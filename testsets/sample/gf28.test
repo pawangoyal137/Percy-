@@ -1,0 +1,12 @@
+_name = 'gf28'
+__doc__ = 'Sample GF28 test set'
+
+num_tests = 10
+num_queries = 2
+mode = 'GF28'
+num_servers = 3
+privacy_level = 1
+num_blocks = [10, 100, 1000]
+block_size = [16, 64, 256]
+database = 'wdb'
+

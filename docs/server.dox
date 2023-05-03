@@ -1,0 +1,79 @@
+// Percy++ Copyright 2007,2012,2013,2014
+// Ian Goldberg <iang@cs.uwaterloo.ca>,
+// Casey Devet <cjdevet@uwaterloo.ca>
+// 
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of version 2 of the GNU General Public License as
+// published by the Free Software Foundation.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// There is a copy of the GNU General Public License in the COPYING file
+// packaged with this plugin; if you cannot find it, write to the Free
+// Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+// 02110-1301 USA
+
+/** \page server PIR Server
+
+A PIR server hosts a database and processes private requests from clients.
+
+Below we explain the steps necessary to create a PIR server using our interface.
+
+\section s_params Protocol Parameters
+
+The first step is to create a <b>protocol parameters</b> object with information 
+about our protocol and the database.  This protocol parameters object will be an 
+instantiation of one of the classes derived from PercyParams:
+<dl>
+<dt>ZZ_pParams</dt>
+<dd>Goldberg's IT-PIR protocol (2007) over the integers modulo p</dd>
+<dt>GF2EParams</dt>
+<dd>Goldberg's IT-PIR protocol (2007) over GF(2^E)</dd>
+<dt>ChorParams</dt>
+<dd>Chor et al.'s IT-PIR protocol (1995)</dd>
+<dt>AGParams</dt>
+<dd>Aguilar Melchor and Gaborit's CPIR protocol (2007)</dd>
+<dt>RecursiveAGParams</dt>
+<dd>Aguilar Melchor and Gaborit's CPIR protocol (2007) with recursion</dd>
+<dt>HybridParams</dt>
+<dd>Devet and Goldberg's Hybrid PIR protocol (2014)</dd>
+</dl>
+
+\section serverparams Server Parameters
+
+The protocol parameters object is then encapsulated in a <b>server 
+parameters</b> object.  This contains information about how the server will
+handle the computation.
+
+If our protocol parameters object is non-recursive (one of AGParams, ChorParams,
+GF2EParams, or ZZ_pParams) we create a PercyServerParams object.
+
+Otherwise, our protocol parameters object is recursive (one of HybridParams or
+RecursiveAGParams) and we create a RecursiveServerParams object.
+
+\section datastore Database
+
+The next step involves setting up a <b>database</b> object.  Using our server
+parameters object, we create a DataStore object:
+<dl>
+<dt>DataStore</dt>
+<dd>Used for a database held in a contiguous block of memory</dd>
+<dt>FileDataStore</dt>
+<dd>Used for a database held in a single file</dd>
+</dl>
+
+\section makeserver Server
+
+Finally, we create our <b>server</b> object.  This is done by passing our
+server parameters and database to the factory method PercyServer::make_server().
+
+\subsection useserver Using the Server
+
+For the server to handle a request from a client, a connection must be 
+established with the client and then the server's PercyServer::handle_request()
+method can be used to process queries.
+
+*/

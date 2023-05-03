@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+
+# Percy++ Copyright 2007,2012,2013,2014
+# Ian Goldberg <iang@cs.uwaterloo.ca>,
+# Casey Devet <cjdevet@uwaterloo.ca>
+##
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of version 2 of the GNU General Public License as
+# published by the Free Software Foundation.
+##
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+##
+# There is a copy of the GNU General Public License in the COPYING file
+# packaged with this plugin; if you cannot find it, write to the Free
+# Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+# 02110-1301 USA
+
+import imp as _imp
+import argparse as _argparse
+import itertools as _itertools
+import sys as _sys
+import os as _os
+import textwrap as _textwrap
+import time as _time
+import csv as _csv
+import math as _math
+import StringIO as _StringIO
+runtest = _imp.load_source('runtest', 'runtest')
+
+STATUS_OK = 'OK'
+STATUS_ALL_PASSED = 'ALL PASSED'
+STATUS_ALL_FAILED = 'ALL FAILED'
+STATUS_SOME_FAILED = 'SOME_FAILED'
+STATUS_ALL_TIMEOUT = 'ALL_TIMED_OUT'
+STATUS_SOME_TIMEOUT = 'SOME_TIMED_OUT'
+STATUS_NO_RUN = 'NO RUN'
+STATUS_EXCEPTION = 'EXCEPTION'
+STATUS_INTERRUPT = 'INTERRUPT'
+
+
+def erange(n, start=1, base=2):
+    '''erange(n, start = 1, base = 2) => [start*base^0, start*base^1, ..., start*base^(n-1)]'''
+    return map(lambda x: base ** x * start, range(n))
+
+
+def mean(data):
+    if len(data) == 0:
+        return 0
+    return float(sum(data)) / len(data)
+
+
+def stddev(data):
+    if len(data) < 2:
+        return 0
+    m = mean(data)
+    return _math.sqrt(float(sum([(x-m)**2 for x in data])) / (len(data) - 1))
+
+
+def mean_stddev(data):
+    m = mean(data)
+    if len(data) < 2:
+        return m, 0
+    sd = _math.sqrt(float(sum([(x-m)**2 for x in data])) / (len(data) - 1))
+    return m, sd
+
+
+class varmap (object):
+    def __init__(self, fn, *args):
+        self.fn = fn
+        self.args = args
+
+    def apply(self, dct):
+        if self.fn == None:
+            return map(dct.__getitem__, self.args)
+        return self.fn(*map(dct.__getitem__, self.args))
+
+
+_client_headers = ['encode_time', 'request_time', 'request_size', 'server_time',
+                   'response_time', 'response_size', 'decode_time', 'total_time']
+
+
+def _get_client_stats(filename):
+    global _client_headers
+    runs_by_id = {}
+    try:
+        with open(filename) as f:
+            headers = f.readline().strip().rstrip(',').lstrip('#').split(',')
+            headers.append('id')
+            reader = _csv.DictReader(_itertools.ifilter(
+                lambda x: len(x) > 0 and x[0] != '#', f), headers)
+            for field_dict in reader:
+                id = field_dict['id']
+                runs_id = runs_by_id.setdefault(id, [0, {}])
+                runs_id[0] += 1
+                for field in _client_headers:
+                    runs_id[1].setdefault(field, []).append(
+                        float(field_dict[field]))
+    except Exception as e:
+        pass
+    stats_by_id = {}
+    for id, (n, runs) in runs_by_id.iteritems():
+        stats_id = (n, {})
+        for field, data in runs.iteritems():
+            stats_id[1][field] = mean_stddev(data)
+        stats_by_id[id] = stats_id
+    return stats_by_id
+
+
+_server_headers = ['request_time', 'request_size', 'server_time',
+                   'response_time', 'response_size', 'total_time']
+
+
+def _get_server_stats(filenames):
+    global _server_headers
+    runs_by_id = {}
+    for filename in filenames:
+        try:
+            with open(filename) as f:
+                headers = f.readline().strip().lstrip('#').split(',')
+                headers.append('id')
+                reader = _csv.DictReader(_itertools.ifilter(
+                    lambda x: len(x) > 0 and x[0] != '#', f), headers)
+                for field_dict in reader:
+                    id = field_dict['id']
+                    runs_id = runs_by_id.setdefault(id, [0, {}])
+                    runs_id[0] += 1
+                    for field in _server_headers:
+                        runs_id[1].setdefault(field, []).append(
+                            float(field_dict[field]))
+        except Exception as e:
+            pass
+    stats_by_id = {}
+    for id, (n, runs) in runs_by_id.iteritems():
+        stats_id = (n / len(filenames), {})
+        for field, data in runs.iteritems():
+            stats_id[1][field] = mean_stddev(data)
+        stats_by_id[id] = stats_id
+    return stats_by_id
+
+
+class _TestSetMeta (type):
+    def __init__(cls, name, bases, dct):
+        if 'log_dir' in dct or '-L' in dct or '--log-dir' in dct:
+            dct.pop('log_dir', None)
+            dct.pop('-L', None)
+            dct.pop('--log-dir', None)
+            print >>_sys.stderr, 'Replacing value for argument "log_dir" in test set', dct[
+                '_name']
+        if 'output_to_file' in dct or '-O' in dct or '--output-to-file' in dct:
+            dct.pop('output_to_file', None)
+            dct.pop('-O', None)
+            dct.pop('--output-to-file', None)
+            print >>_sys.stderr, 'Replacing value for argument "output_to_file" in test set', dct[
+                '_name']
+        if 'id' in dct or '--id' in dct:
+            dct.pop('id', None)
+            dct.pop('--id', None)
+            print >>_sys.stderr, 'Replacing value for argument "id" in test set', dct['_name']
+        if 'verbose' in dct or '--verbose' in dct:
+            dct.pop('verbose', None)
+            dct.pop('--verbose', None)
+            print >>_sys.stderr, 'Replacing value for argument "verbose" in test set', dct[
+                '_name']
+        super(_TestSetMeta, cls).__init__(name, bases, dct)
+        try:
+            log_dir = _os.path.dirname(dct['_testfile']) + '/' + dct['_id']
+            log_link = _os.path.dirname(dct['_testfile']) + '/latest'
+            if not _os.path.isdir(log_dir):
+                _os.makedirs(log_dir)
+            if log_dir == '':
+                log_dir = '.'
+            if _os.path.exists(log_link):
+                _os.unlink(log_link)
+            _os.symlink(_os.path.realpath(log_dir), log_link)
+        except Exception as e:
+            print(e)
+            log_dir = '.'
+
+        keys = filter(lambda x: not x.startswith('_'), dct.keys())
+        vals = [dct[k] for k in keys]
+        valsiter = map(lambda x: x if hasattr(x, '__iter__') else [x], vals)
+
+        log_file = log_dir + '/' + dct['_name'] + '.out'
+        log_headers = sorted(keys) + ['status', 'tests_run', 'tests_failed'] + \
+            ['client_' + s for s in _client_headers] + \
+            ['server_' + s for s in _server_headers]
+        with open(log_file, 'w') as f:
+            f.write('#' + ','.join(log_headers) + '\n')
+
+        no_run = dct['_status'] == STATUS_NO_RUN
+
+        cls._tests = []
+
+        def init(obj):
+            i = 1
+            for vlist in _itertools.product(*valsiter):
+                testdct = dict(zip(keys, vlist))
+                testdct['log_dir'] = log_dir + '/tmp'
+                testdct['id'] = '%s.%d' % (dct['_name'], i)
+                testdct['output_to_file'] = log_dir + '/tmp/out'
+                mapkeys = filter(lambda key: isinstance(
+                    testdct[key], varmap), testdct)
+                mapvals = [testdct[key].apply(testdct) for key in mapkeys]
+                mapvalsiter = map(lambda x: x if hasattr(
+                    x, '__iter__') else [x], mapvals)
+                for mapvlist in _itertools.product(*mapvalsiter):
+                    maptestdct = testdct.copy()
+                    maptestdct.update(zip(mapkeys, mapvlist))
+                    obj._tests.append(maptestdct)
+                i += 1
+        cls.__init__ = init
+
+        cls.num_tests = lambda obj: len(obj._tests)
+
+        def run(obj):
+            print >>_sys.stderr, "Test Set '%s':" % (dct['_name'])
+            ret = 0
+            i = 1
+            num_tests = obj.num_tests()
+            for test in obj._tests:
+                print >>_sys.stderr, 'Test', i, 'of', num_tests
+                fails = 0
+                status = STATUS_OK
+                runtest_args = []
+                try:
+                    if obj._status == STATUS_NO_RUN:
+                        N, runtest_args = runtest._check_dict(test)
+                    else:
+                        with runtest.Test(test) as t:
+                            runtest_args = t._cmdline_args
+                            if obj._status == STATUS_OK:
+                                fails = t.run()
+                                if fails == t.testsrun:
+                                    status = STATUS_ALL_FAILED
+                                    ret += 1
+                                elif fails > 0:
+                                    status = STATUS_SOME_FAILED
+                                    ret += 1
+                                elif t.timeouts == t.testsrun:
+                                    status = STATUS_ALL_TIMEOUT
+                                elif t.timeouts > 0:
+                                    status = STATUS_SOME_TIMEOUT
+                                else:
+                                    status = STATUS_ALL_PASSED
+                            else:
+                                status = STATUS_NO_RUN
+                except KeyboardInterrupt as e:
+                    obj._status = STATUS_INTERRUPT
+                    status = STATUS_INTERRUPT
+                    raise e
+                except Exception as e:
+                    print >>_sys.stderr, 'Caught Exception:', e
+                    status = STATUS_EXCEPTION
+                finally:
+                    values = {}
+                    client_num_tests, clientstats = _get_client_stats(
+                        log_dir + '/tmp/client.stats').get(test['id'], (0, {}))
+                    for h in _client_headers:
+                        if h in clientstats:
+                            m, sd = clientstats[h]
+                            values['client_' + h] = (int(m) if m.is_integer()
+                                                     else m) if sd == 0 else '%f:%f' % (m, sd)
+                        else:
+                            values['client_' + h] = None
+                    num_servers = test['num_servers'] if (
+                        'num_servers' in test and test['num_servers'] != None) else 1
+                    server_num_tests, serverstats = _get_server_stats(
+                        [log_dir + '/tmp/server%d.stats' % j for j in range(0, num_servers)]).get(test['id'], (0, {}))
+                    for h in _server_headers:
+                        if h in serverstats:
+                            m, sd = serverstats[h]
+                            values['server_' + h] = (int(m) if m.is_integer()
+                                                     else m) if sd == 0 else '%f:%f' % (m, sd)
+                        else:
+                            values['server_' + h] = None
+                    values['status'] = status
+                    values['tests_run'] = client_num_tests
+                    values['tests_failed'] = fails
+                    values.update(test)
+                    with open(log_file, 'a') as f:
+                        writer = _csv.DictWriter(
+                            f, log_headers, extrasaction='ignore', lineterminator='\n')
+                        writer.writerow(values)
+                    for statfile in filter(lambda x: x.endswith('.stats'), _os.listdir('%s/tmp/' % (log_dir))):
+                        statfilebase = _os.path.basename(statfile)
+                        if i == 1:
+                            _os.system('cat %s/tmp/%s > %s/%s' %
+                                       (log_dir, statfilebase, log_dir, statfilebase))
+                        else:
+                            _os.system('tail -n+2 %s/tmp/%s >> %s/%s' %
+                                       (log_dir, statfilebase, log_dir, statfilebase))
+                    if obj._log_all or status in [STATUS_ALL_FAILED, STATUS_SOME_FAILED, STATUS_INTERRUPT, STATUS_EXCEPTION]:
+                        with open(log_dir + '/outputs', 'a') as f:
+                            print >>f, '#' * 80
+                            print >>f, dct['_name']
+                            print >>f, 'Test', i, 'of', num_tests
+                            good_args = []
+                            j = 0
+                            while j < len(runtest_args):
+                                if runtest_args[j] in ['-L', '--log-dir', '-O', '--output-to-file', '--id']:
+                                    j += 2
+                                else:
+                                    good_args.append(runtest_args[j])
+                                    j += 1
+                            print >>f, './runtest ' + \
+                                ' '.join(map(runtest.safe_argument, good_args))
+                        _os.system('cat %s/tmp/out >> %s/outputs' %
+                                   (log_dir, log_dir))
+                    _os.system('rm -rf %s/tmp' % (log_dir))
+                i += 1
+            return ret
+        cls.run = run
+
+
+class FileTestSet (object):
+    def __init__(self, testfile, id, status=STATUS_OK, log_all=False):
+        try:
+            with open(testfile, 'r') as tf:
+                tfstr = tf.read()
+        except:
+            raise IOError('Error reading test set file: %s' % (testfile))
+        tfstr = '\n'.join(
+            map(lambda x: '    ' + x, _textwrap.dedent(tfstr).splitlines()))
+        testsetname = _os.path.splitext(_os.path.basename(testfile))[0]
+        classstr = '''\
+            class _TestSet (object):
+                __metaclass__ = _TestSetMeta
+                _name = '%s'
+                _testfile = '%s'
+                _id = '%s'
+                _status = '%s'
+                _log_all = %s
+	    ''' % (testsetname, testfile, id, status, log_all)
+        classstr = _textwrap.dedent(classstr)
+        classstr += tfstr
+        exec(classstr)
+        self._ts = _TestSet()
+
+    def run(self):
+        return self._ts.run()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, extype, exval, tb):
+        return False
+
+
+class _HelpTestsetsAction (_argparse.Action):
+    def __init__(self, option_strings, dest=_argparse.SUPPRESS, default=_argparse.SUPPRESS, help=None):
+        super(_HelpTestsetsAction, self).__init__(
+            option_strings=option_strings, dest=dest, default=default, nargs=0, help=help)
+        try:
+            import fcntl
+            import termios
+            import struct
+            h, w = struct.unpack('hh', fcntl.ioctl(
+                0, termios.TIOCGWINSZ, '1234'))
+            self.width = w
+        except:
+            try:
+                self.width = int(os.environ['COLUMNS'])
+            except:
+                self.width = 80
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        def wrap(text, width, indent_spaces=0):
+            indent = ' ' * indent_spaces
+            return _textwrap.fill(text, width, initial_indent=indent, subsequent_indent=indent)
+        print(wrap('Testset Creation for runtestset', self.width) + '\n')
+        print('=' * self.width + '\n')
+        print(wrap('TESTSET FORMAT', self.width) + '\n')
+        print(wrap('Testsets are files that contain python variables.  Any variables that do not start with an underscore ("_") are treated as runtest arguments.  These arguments can have three types of values:', self.width) + '\n')
+        value_types = [('a non-iteratble value', 'This value will be the value used for all tests.'),
+                       ('an iterable value',
+                        'Tests will be run with all values in the iterable object.'),
+                       ('varmap(func, param1, param2, ...)', 'This is used to create a value from the values of other arguments.  For example, if you wanted the argument \'abc\' to have the value resulting from the multiplication of the values of arguments \'def\' and \'ghi\', you would use "abc = varmap(lambda x,y: x*y, \'def\', \'ghi\')"')]
+        for T, D in value_types:
+            print(wrap(T, self.width, 4))
+            print(wrap(D, self.width, 8))
+        print()
+        print '=' * self.width + '\n'
+        print wrap('TESTS CONTAINED IN A TESTSET', self.width) + '\n'
+        print wrap('The testset will consist of the cross-product of all runtest arguments defined.  For example, if the following testset is defined:', self.width) + '\n'
+        print '    a = [1, 2, 3]'
+        print '    b = [2, 4, 7]'
+        print '    c = 4'
+        print '    d = varmap(lambda a,b: a*b, \'a\', \'b\')\n'
+        print wrap('then the testset would contain the following tests (notated as the values (a, b, c, d)):', self.width) + '\n'
+        print '    (1, 2, 4, 2)'
+        print '    (1, 4, 4, 4)'
+        print '    (1, 7, 4, 7)'
+        print '    (2, 2, 4, 4)'
+        print '    (2, 4, 4, 8)'
+        print '    (2, 7, 4, 14)'
+        print '    (3, 2, 4, 6)'
+        print '    (3, 4, 4, 12)'
+        print '    (3, 7, 4, 21).\n'
+        print wrap('For more examples, see the "testsets" directory.', self.width) + '\n'
+        print '=' * self.width + '\n'
+        print wrap('VALID RUNTEST ARGUMENTS', self.width) + '\n'
+        print wrap('The following is a list of the valid runtest arguments and a description of each', self.width) + '\n'
+        ss = _StringIO.StringIO()
+        runtest.print_argument_info(ss, self.width - 4)
+        lines = ss.getvalue().splitlines()
+        ss.close()
+        for L in lines:
+            print '   ', L
+        print
+        parser.exit()
+
+
+_parser = _argparse.ArgumentParser()
+_parser.description = 'Run a set of tests on Percy++.  Testsets are specified as python variables.  Run this script with the --help-testsets option to learn more about testset creation.'
+_parser.add_argument('-H', '--help-testsets', action=_HelpTestsetsAction,
+                     help='Print help on creating testsets.')
+_parser.add_argument('--silent', action='store_true',
+                     help='Do not show stderr output.')
+_parser.add_argument('--id', default=_time.strftime('%Y_%m_%d_%H_%M_%S'),
+                     help='ID for this test set run.  Defaults to a timestamp.')
+_parser.add_argument('--no-run', action='store_true',
+                     help='Test the validity of the test set, but do not actually run tests.')
+_parser.add_argument('--log-all', action='store_true',
+                     help='Store the output log for all tests.  If not set, only output logs for failed tests will be stored.')
+_parser.add_argument('files', nargs='+', metavar='FILE/DIR',
+                     help='If a file is specified, it will be used as a test set.  If a directory is specified, all files with the suffix ".test" will be used as test sets.')
+
+if __name__ == '__main__':
+    if len(_sys.argv) == 1:
+        _parser.print_help()
+        _sys.exit(-1)
+    args = _parser.parse_args()
+    if args.silent:
+        _sys.stderr = open(_os.devnull, 'wb')
+    ret = 0
+    status = STATUS_NO_RUN if args.no_run else STATUS_OK
+    for f in args.files:
+        if _os.path.isdir(f):
+            files = map(lambda x: f + ('' if f.endswith('/') else '/') + x,
+                        filter(lambda y: y.endswith('.test'), _os.listdir(f)))
+        else:
+            files = [f]
+        for tf in files:
+            try:
+                with FileTestSet(tf, args.id, status, args.log_all) as ts:
+                    tsret = ts.run()
+                    ret += tsret if tsret != False else 0
+            except KeyboardInterrupt, e:
+                _sys.exit(-1)
+    _sys.exit(ret)

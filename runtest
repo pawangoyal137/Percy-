@@ -1,0 +1,1923 @@
+#!/usr/bin/env python3
+
+# Percy++ Copyright 2007,2012,2013,2014
+# Ian Goldberg <iang@cs.uwaterloo.ca>,
+# Casey Devet <cjdevet@uwaterloo.ca>,
+# Wouter Lueks <wouter@telox.net>,
+# Ann Yang <y242yang@uwaterloo.ca>
+##
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of version 2 of the GNU General Public License as
+# published by the Free Software Foundation.
+##
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+##
+# There is a copy of the GNU General Public License in the COPYING file
+# packaged with this plugin; if you cannot find it, write to the Free
+# Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+# 02110-1301 USA
+
+import datetime
+import time
+import os
+import sys
+import sshclient  # located in this directory
+from getpass import getuser
+from socket import gethostname
+import signal
+import textwrap as _textwrap
+import shlex
+import threading
+import traceback
+import random
+import subprocess
+from argparse import ArgumentParser, Namespace, _AppendAction, _CountAction, _HelpAction, _StoreAction, _StoreFalseAction, _StoreTrueAction
+import argparse
+
+##################################### Modes ####################################
+#
+# Possible modes with their help messages
+#
+
+_modes = {
+    'ZZ_P': "Goldberg '07 over integers modulo p",
+    'GF28': "Goldberg '07 over GF(2^8)",
+    'GF216': "Goldberg '07 over GF(2^16)",
+    'CHOR': "Chor et al. '95",
+    'AG': "Aguilar-Melchor, Gaborit '07",
+    'HYBRID': "Hybrid combining AG and one of {GF28, GF216, CHOR, ZZ_P}"
+}
+
+############################# Custom Argument Types ############################
+#
+# Add functions here to test if arguments are of some type
+#
+
+
+def pos_int(s):
+    '''A positive integer.'''
+    ret = int(s)
+    if ret < 1:
+        raise ValueError('Invalid positive integer: %r' % (s))
+    return ret
+
+
+def nat(s):
+    '''A natural number.  I.e. an integer greater than or equal to zero.'''
+    ret = int(s)
+    if ret < 0:
+        raise ValueError('Invalid positive integer: %r' % (s))
+    return ret
+
+
+def mult_eight(s):
+    '''A positive multiple of eight.'''
+    ret = int(s)
+    if ret > 0 and ret % 8 == 0:
+        return ret
+    raise ValueError('Invalid multiple of eight: %r' % (s))
+
+
+def natlist(s):
+    '''Space-delimited list of natural numbers.'''
+    L = s.split()
+    try:
+        return map(lambda x: None if x == 'None' else int(x), L)
+    except:
+        raise ValueError('Invalid list of natural numbers: %s' % s)
+
+
+def strassen_depth(depth_orig):
+    depth = depth_orig.lower()
+    if depth == "optimal" or depth == "o":
+        return "optimal"
+    ret = int(depth)
+    if ret >= -1:
+        return depth
+    raise ValueError('Invalid Strassen depth %s' % depth_orig)
+
+
+################################## Arguments ###################################
+#
+# Here we define the arguments for this script.  They fall under four classes:
+#
+#   - arguments required for all modes
+#   - options available for all modes
+#   - arguments required for specific modes
+#   - options available for specific modes
+#
+# An argument can be defined using one of the following classes:
+#
+#   _StoreAction (option_strings, dest, nargs=None, const=None, default=None,
+#	    type=None, choices=None, required=False, help=None, metavar=None)
+#	This just stores the argument's value.
+#
+#   _StoreTrueAction (option_strings, dest, default=False, required=False,
+#	    help=None)
+#	Stores the value True.  Creates an argument-less flag.
+#
+#   _StoreFalseAction (option_strings, dest, default=True, required=False,
+#	    help=None)
+#	Stores the value True.  Creates an argument-less flag.
+#
+#   _AppendAction (option_strings, dest, nargs=None, const=None, default=None,
+#	    type=None, choices=None, required=False, help=None, metavar=None)
+#	This stores a list, and appends each argument value to the list.
+#
+#   _CountAction (option_strings, dest, default=None, required=False, help=None)
+#       This counts the number of times a keyword argument occurs.
+#
+
+# Required arguments for all modes
+_common_required = [
+    _StoreAction([], 'num_blocks', type=pos_int, required=True,
+                 help='The number of records in the database.'),
+    _StoreAction([], 'block_size', type=pos_int, required=True,
+                 help='The size, in bytes, of each record.')
+]
+
+# Options for all modes
+#    A number of options (including --help, --verbose, --valgrind,
+#    -O/--output-to-file, ...) are included automatically (i.e. should not be
+#    customized)
+_common_optional = [
+    _StoreAction(['-n', '--num-tests'], 'num_tests', type=pos_int, default=1,
+                 help='The number of times to run the test.'),
+    _StoreAction(['-q', '--num-queries'], 'num_queries', type=pos_int, default=1,
+                 help='The number of queries per test.'),
+    _StoreAction(['-T', '--num-threads'], 'num_threads', type=pos_int,
+                 help='Use NUM_THREADS threads for server computation.  No threading if not specified.'),
+    _StoreTrueAction(['-F', '--forked-threads'], 'forked_threads',
+                     help='Use forked processes for server computation instead of threads.'),
+    _StoreAction(['--split'], 'split', choices=['records', 'queries'], default='records',
+                 help='How the database is split between threads.'),
+    _StoreAction(['--dist-split'], 'dist_split', choices=['records', 'queries'], default='records',
+                 help='How the database is split between workers.'),
+]
+
+# Required arguments for the corresponding list of modes
+_mode_specific_required = [
+    (['ZZ_P', 'GF28', 'GF216', 'CHOR', 'HYBRID'],
+        _StoreAction([], 'num_servers', type=pos_int, required=True, help='Number of servers.')),
+    (['ZZ_P', 'GF28', 'GF216', 'HYBRID'],
+        _StoreAction([], 'privacy_level', type=nat, required=True, help='Number of servers that can collude.'))
+]
+
+# Options for the corresponding list of modes
+_mode_specific_optional = [
+    (['ZZ_P', 'GF28', 'GF216', 'HYBRID'],
+        _StoreAction(['-z', '--num-byzantine'], 'num_byzantine', type=nat, default=0,
+                     help='Number of byzantine servers.')),
+    (['ZZ_P', 'GF28', 'GF216'],
+        _StoreAction(['-Q', '--batch-query-size'], 'batch_query_size', type=nat, default=1,
+                     help='Number of database blocks to include in one query.')),
+    (['ZZ_P'],
+        _StoreAction(['-w', '--word-size'], 'word_size', type=mult_eight, default=8,
+                     help='Size of database words.')),
+    (['AG', 'HYBRID'],
+        _StoreAction(['-d', '--depth'], 'depth', type=pos_int,
+                     help='Use a recursive depth of DEPTH.  If not specified the depth will be chosen to minimize communication.')),
+    (['AG', 'HYBRID'],
+        _StoreTrueAction(['--dist-first-only'], 'dist_first_only',
+                         help='Use distributed server computation settings only for the first iteration.')),
+    (['AG', 'HYBRID'],
+        _StoreAction(['--master-num-threads'], 'master_num_threads', type=pos_int,
+                     help='The number of threads to use for the remaining iterations when --dist-first-only is set.  Defaults to the value of --num-threads.')),
+    (['AG'],
+        _StoreTrueAction(['-r', '--recursive'], 'recursive',
+                         help='Use the recursive version of the AG protocol.')),
+    (['AG'],
+        _StoreAction(['-w', '--word-size'], 'word_size', type=pos_int, choices=[16, 20], default=20,
+                     help='Size of database words.')),
+    (['HYBRID'],
+        _StoreAction(['-i', '--it-mode'], 'it_mode', choices=['GF28', 'GF216', 'ZZ_P', 'CHOR'], default='GF28',
+                     help='Mode used for IT computation.')),
+    (['HYBRID'],
+        _StoreAction(['-Z', '--it-word-size'], 'it_word_size', type=mult_eight, default=8,
+                     help='Size of database words for IT computation.')),
+    (['ZZ_P', 'GF28', 'GF216', 'CHOR'],
+        _StoreTrueAction(['--partial-databases'], 'partial_databases',
+                         help='Workers treat the database not as the entire database, but only their part.')),
+    (['ZZ_P', 'GF28', 'GF216'],
+        _StoreAction(['-s', '--strassen'], 'strassen', type=strassen_depth, default="optimal",
+                     help='Maximum strassen depth, "optimal" gives optimal level (Default: %(default)s)')),
+    (['ZZ_P', 'GF28', 'GF216', 'HYBRID'],
+        _StoreAction(['-t', '--tau'], 'tau', type=nat, default=0,
+                     help='The level of tau-independence.  A collision of up to tau servers cannot know the contents of the database.'))
+]
+
+
+############################## Get Client Command ##############################
+#
+# Create a list representing the client command line call.  args is the parsed
+# command line arguments from this script.
+#
+
+def get_client_command(args, serverinfo, block_numbers):
+    if args.mode == 'ZZ_P':
+        cmdargs = ['./pirclient', '-m', args.mode, args.num_blocks,
+                   args.block_size, serverinfo, args.privacy_level,
+                   block_numbers, '-w', args.word_size, '-Q', args.batch_query_size,
+                   '-t', args.tau]
+    elif args.mode == 'GF28':
+        cmdargs = ['./pirclient', '-m', args.mode, args.num_blocks,
+                   args.block_size, serverinfo, args.privacy_level,
+                   block_numbers, '-Q', args.batch_query_size, '-t', args.tau]
+    elif args.mode == 'GF216':
+        cmdargs = ['./pirclient', '-m', args.mode, args.num_blocks,
+                   args.block_size, serverinfo, args.privacy_level,
+                   block_numbers, '-w', '16', '-Q', args.batch_query_size, '-t',
+                   args.tau]
+    elif args.mode == 'CHOR':
+        cmdargs = ['./pirclient', '-m', args.mode, args.num_blocks,
+                   args.block_size, serverinfo, args.num_servers-1,
+                   block_numbers, '-w', 1]
+    elif args.mode == 'AG':
+        cmdargs = ['./agclient', args.num_blocks, args.block_size,
+                   block_numbers, serverinfo, '-w', args.word_size]
+        if args.recursive:
+            cmdargs.append('-r')
+        if args.depth != None:
+            cmdargs.extend(['-d', args.depth])
+    elif args.mode == 'HYBRID':
+        cmdargs = ['./hybridclient', args.num_blocks, args.block_size,
+                   block_numbers, args.num_servers, args.privacy_level,
+                   serverinfo, '-m', args.it_mode, '-Z', args.it_word_size, '-t',
+                   args.tau]
+        if args.depth != None:
+            cmdargs.extend(['-d', args.depth])
+    else:
+        cmdargs = None
+    return cmdargs
+
+
+############################## Get Server Command ##############################
+#
+# Create a list representing the server command line call.  args is the parsed
+# command line arguments from this script.
+#
+#    sid          Server ID to be used
+#    port         Port to be used
+#    database     Database to be used.  Will be None when masterinfo is
+#                 specified.
+#    masterinfo   If not None, we are specifying a master server.  The value
+#                 will be the string of worker information to be passed to
+#                 the executable.
+#    workerinfo   If not None, we are specifying a worker server.  The value
+#                 will be a 2-tuple (NUM_WORKERS, WORKER_INDEX).
+#
+
+def get_server_command(args, sid, port, database=None, masterinfo=None, workerinfo=None):
+    # Note: distributed stuff handled below
+    if args.mode == 'ZZ_P':
+        cmdargs = ['./pirserver', sid, args.num_blocks, args.block_size,
+                   '-m', args.mode, '-p', port, '-w', args.word_size, '-s',
+                   args.strassen]
+        if sid <= args.num_byzantine:
+            cmdargs.append('-z')
+        if args.tau > 0:
+            cmdargs.append('-t')
+    elif args.mode == 'GF28':
+        cmdargs = ['./pirserver', sid, args.num_blocks, args.block_size,
+                   '-m', args.mode, '-p', port, '-s', args.strassen]
+        if sid <= args.num_byzantine:
+            cmdargs.append('-z')
+        if args.tau > 0:
+            cmdargs.append('-t')
+    elif args.mode == 'GF216':
+        cmdargs = ['./pirserver', sid, args.num_blocks, args.block_size,
+                   '-m', args.mode, '-p', port, '-w', '16', '-s', args.strassen]
+        if sid <= args.num_byzantine:
+            cmdargs.append('-z')
+        if args.tau > 0:
+            cmdargs.append('-t')
+    elif args.mode == 'CHOR':
+        cmdargs = ['./pirserver', sid, args.num_blocks, args.block_size,
+                   '-m', args.mode, '-p', port, '-w', 1]
+    elif args.mode == 'AG':
+        cmdargs = ['./agserver', sid, args.num_blocks, args.block_size,
+                   '-p', port, '-w', args.word_size]
+        if args.recursive:
+            cmdargs.append('-r')
+        if args.depth != None:
+            cmdargs.extend(['-d', args.depth])
+        if args.dist_first_only:
+            cmdargs.extend(['-f'])
+    elif args.mode == 'HYBRID':
+        cmdargs = ['./hybridserver', sid, args.num_blocks,
+                   args.block_size, '-p', port, '-m', args.it_mode, '-Z',
+                   args.it_word_size]
+        if args.depth != None:
+            cmdargs.extend(['-d', args.depth])
+        if args.dist_first_only:
+            cmdargs.extend(['-f'])
+        if args.tau > 0:
+            cmdargs.append('-t')
+    else:
+        return None
+    # Distributed stuff
+    if database != None:
+        cmdargs.insert(1, database)
+    if masterinfo != None:
+        cmdargs[1:1] = ['--master', masterinfo]
+        cmdargs.extend(['-D', args.dist_split])
+    elif workerinfo != None:
+        cmdargs[1:1] = ['--worker', workerinfo[0], workerinfo[1]]
+        cmdargs.extend(['-D', args.dist_split])
+        if 'partial_databases' in args:
+            if args.partial_databases:
+                cmdargs.append('-P')
+    if masterinfo == None:
+        if args.num_threads != None:
+            cmdargs.extend(['-T', args.num_threads, '-S', args.split])
+        if args.forked_threads:
+            cmdargs.append('-F')
+    else:
+        if args.mode in ['AG', 'HYBRID'] and args.master_num_threads != None:
+            cmdargs.extend(['-T', args.master_num_threads, '-S', args.split])
+        elif args.num_threads != None:
+            cmdargs.extend(['-T', args.num_threads, '-S', args.split])
+        if args.forked_threads:
+            cmdargs.append('-F')
+    return cmdargs
+
+
+################################################################################
+################################################################################
+##          You shouldn't need to change any code below this point.           ##
+################################################################################
+################################################################################
+
+
+random.seed()
+_localhost = gethostname()
+_user = getuser()
+devnull = open(os.devnull, 'wb')
+_ssh_config = sshclient.SSHConfig(['~/.ssh/config', 'hosts.cfg'])
+
+
+class RuntestException (Exception):
+    pass
+
+
+class RuntestWarning (Warning):
+    pass
+
+
+class ValgrindError (Exception):
+    pass
+
+
+def safe_argument(s):
+    sstr = str(s)
+    return '"' + sstr + '"' if (' ' in sstr or sstr == '') else sstr
+
+
+def get_type_doc(type):
+    typedoc = type.__doc__
+    if typedoc == None:
+        return 'ANY'
+    elif '\n' in typedoc:
+        return type.__name__
+    return typedoc
+
+############################# Client Process Class #############################
+
+
+class Client (object):
+    _block_numbers_placeholder = '<<<block_numbers>>>'
+
+    def __init__(self, args, serverinfo, host=None, pirdir=None, log=devnull):
+        self._args = args
+        self._block_size = args.block_size
+        self._serverinfo = serverinfo
+        self._log = log
+        self._host = host
+        self._pirdir = pirdir
+        self._statsfile = '/tmp/%s.client.stats' % (args.id)
+        self._valgrind = args.valgrind
+        self._id = args.id
+
+        self._process = None
+        self._no_run = args.no_run
+
+    def stop(self):
+        stats = ''
+        if self._no_run:
+            return True, stats
+        if self._host == None:
+            if self._process != None and self._process.poll() == None:
+                try:
+                    self._process.kill()
+                except:
+                    pass
+            try:
+                with open(self._statsfile) as statsfile:
+                    stats = statsfile.read()
+                os.remove(self._statsfile)
+            except:
+                pass
+        else:
+            if self._process != None:
+                self._process.kill()
+            process = self._host.exec_command(
+                ['cat', self._statsfile], self._pirdir)
+            stats = process.stdout.read()
+        self._process = None
+        return True, stats
+
+    def is_running(self):
+        return self._process != None
+
+    def get_command_list(self, block_numbers=_block_numbers_placeholder):
+        bnstr = block_numbers
+        if isinstance(bnstr, list):
+            bnstr = ' '.join(map(str, block_numbers))
+        cmd_list = map(str, get_client_command(
+            self._args, self._serverinfo, bnstr))
+        if self._args.valgrind:
+            cmd_list.insert(0, 'valgrind')
+            cmd_list.insert(1, '--error-exitcode=255')
+            cmd_list.insert(2, '--leak-check=full')
+            cmd_list.insert(3, '--track-origins=yes')
+            if not self._args.no_suppression:
+                cmd_list.insert(4, '--suppressions=valgrind_suppressions')
+        if not self._args.no_run:
+            cmd_list.extend(['-l', self._statsfile, '-L', str(self._id), '-H'])
+        if self._args.null_client:
+            cmd_list.append('-0')
+        return cmd_list
+
+    def get_command(self, block_numbers=_block_numbers_placeholder):
+        return ' '.join(map(safe_argument, self.get_command_list(block_numbers)))
+
+    def run(self, block_numbers):
+        if self._no_run:
+            return []
+        if self.is_running():
+            print >>self._log, 'Client is already running.'
+            return []
+        cmd_list = self.get_command_list(block_numbers)
+        print >>self._log, self.get_command(block_numbers)
+        self._log.flush()
+        if self._host == None:
+            self._process = subprocess.Popen(
+                cmd_list, stdout=subprocess.PIPE, stderr=self._log, cwd=self._pirdir)
+            out, err = self._process.communicate()
+            if self._valgrind and self._process.wait() == 255:
+                raise ValgrindError()
+        else:
+            self._process = self._host.exec_command(cmd_list, self._pirdir)
+            for line in self._process.stderr:
+                self._log.write(line)
+            out = self._process.stdout.read()
+            if self._valgrind and self._process.wait() == 255:
+                raise ValgrindError()
+        self._process = None
+        outlist = []
+        offset = 0
+        while offset < len(out):
+            outlist.append(out[offset:offset+self._block_size])
+            offset += self._block_size
+        return outlist
+
+############################# Server Process Class #############################
+
+
+class ServerBase (object):
+    def __init__(self, args, sid, port, host=None, pirdir=None, log=devnull):
+        self._args = args
+        self.sid = sid
+        self.port = port
+        self._host = host
+        self._pirdir = pirdir
+        self._log = log
+        self._process = None
+        self._no_run = args.no_run
+
+    def start(self):
+        if self._process != None:
+            print >>self._log, 'Server already started.'
+            return True
+        if self._no_run:
+            return False
+        cmd_list = map(str, self.get_command_list())
+        cmd = ' '.join(map(safe_argument, cmd_list))
+        print >>self._log, cmd
+        self._log.flush()
+        if self._host == None:
+            self._process = subprocess.Popen(
+                cmd_list, stdout=devnull, stderr=self._log, cwd=self._pirdir)
+        else:
+            self._process = self._host.exec_command(cmd_list, self._pirdir)
+        self._running = True
+        return True
+
+    def get_exit_code(self, wait=False):
+        if wait:
+            return self._process.wait()
+        if self._host == None:
+            return self._process.poll()
+        else:
+            return self._process.get_exit_code()
+
+    def stop(self):
+        stats = ''
+        if self._no_run:
+            return True, stats
+        if self._process == None:
+            print >>self._log, 'Server has not been started.'
+            return False, stats
+        ret = True
+        if self._host == None:
+            if self._process.poll() == None:
+                self._process.kill()
+            try:
+                with open(self._statsfile) as statsfile:
+                    stats = statsfile.read()
+                os.remove(self._statsfile)
+            except:
+                pass
+        else:
+            self._process.kill()
+            process = self._host.exec_command(
+                ['cat', self._statsfile], self._pirdir)
+            stats = process.stdout.read()
+            self._host.exec_command(['rm', self._statsfile], self._pirdir)
+            self._log.write(self._process.stderr.read())
+        self._process = None
+        self._running = False
+        return ret, stats
+
+    def stop_children(self):
+        main_pid = str(self._process.pid)
+        if self._host == None:
+            process = subprocess.Popen(
+                ['ps', 'x', '-o', '%p %r'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        else:
+            process = self._host.exec_command(['ps', 'x', '-o', '%p %r'])
+        processes = map(str.split, process.stdout.readlines())
+        children = map(lambda x: x[0], filter(
+            lambda pid, pgid: pgid == main_pid and pid != main_pid, processes))
+        if self._host == None:
+            process = subprocess.Popen(
+                ['kill'] + children, stdout=devnull, stderr=devnull)
+        else:
+            process = self._host.exec_command(['kill'] + children)
+
+    def is_running(self):
+        return self._running
+
+    def _call_get_server_command(self):
+        raise NotImplementedError(
+            'ServerBase cannot be used directly.  Use one of Server, Master or Worker')
+
+    def get_command_list(self):
+        cmd_list = self._call_get_server_command()
+        if self._args.valgrind:
+            cmd_list[:0] = ['valgrind', '--error-exitcode=255',
+                            '--leak-check=full', '--track-origins=yes']
+            if not self._args.no_suppression:
+                cmd_list.insert(4, '--suppressions=valgrind_suppressions')
+            cmd_list.append('--oneconn')
+        if not self._no_run:
+            cmd_list.extend(['-l', self._statsfile, '-L',
+                            str(self._args.id), '-H'])
+        if self._args.numa_nodes > 0:
+            num_numa_nodes = self._args.numa_nodes
+            node = (self.sid - 1) % num_numa_nodes
+            cmd_list[:0] = ['numactl', '--cpunodebind=%d' %
+                            (node), '--membind=%d' % (node)]
+        return cmd_list
+
+    def get_command(self):
+        return ' '.join(map(safe_argument, self.get_command_list()))
+
+    def infostr(self):
+        if self._host == None:
+            return ':'.join(map(str, [self.sid, _localhost, self.port]))
+        else:
+            return ':'.join(map(str, [self.sid, self._host.addr, self.port]))
+
+
+class Server (ServerBase):
+    def __init__(self, args, sid, port, database, host=None, pirdir=None, log=devnull):
+        super(Server, self).__init__(args, sid, port,
+                                     host=host, pirdir=pirdir, log=log)
+        self.database = database
+        if args.tau > 0:
+            self.database += '.%d' % (sid)
+        self._statsfile = '/tmp/%s.server%d.stats' % (args.id, sid)
+        if not args.no_run:
+            self.start()
+
+    def _call_get_server_command(self):
+        return get_server_command(self._args, self.sid, self.port, self.database)
+
+
+class Master (ServerBase):
+    def __init__(self, args, sid, port, workers, host=None, pirdir=None, log=devnull):
+        super(Master, self).__init__(args, sid, port,
+                                     host=host, pirdir=pirdir, log=log)
+        self.workers = workers
+        self._statsfile = '/tmp/%s.server%d.stats' % (args.id, sid)
+        if not args.no_run:
+            self.start()
+
+    def _call_get_server_command(self):
+        workerinfo = ' '.join([s.infostr() for s in self.workers])
+        return get_server_command(self._args, self.sid, self.port, masterinfo=workerinfo)
+
+
+class Worker (ServerBase):
+    def __init__(self, args, sid, port, database, num_workers, index, host=None, pirdir=None, log=devnull):
+        super(Worker, self).__init__(args, sid, port,
+                                     host=host, pirdir=pirdir, log=log)
+        self.database = database
+        if args.tau > 0:
+            self.database += '.%d' % (sid)
+        self._num_workers = num_workers
+        self.index = index
+        self._statsfile = '/tmp/%s.server%d.worker%d.stats' % (
+            args.id, sid, index)
+        if not args.no_run:
+            self.start()
+
+    def _call_get_server_command(self):
+        return get_server_command(self._args, self.sid, self.port, self.database, workerinfo=(self._num_workers, self.index))
+
+
+########################### Database Representation ###########################
+
+class Database (object):
+    def __init__(self, dbfile, num_blocks, block_size, host=None, pirdir=None, log=devnull):
+        self._dbfile = dbfile
+        self.num_blocks = num_blocks
+        self.block_size = block_size
+        self._host = host
+        self._pirdir = pirdir
+        self._log = log
+
+    def get_blocks(self, block_numbers):
+        large_numbers = filter(
+            lambda x: x >= self.num_blocks, map(int, block_numbers))
+        if large_numbers != []:
+            raise RuntestException('Block numbers are too large: %s' % (
+                ' '.join(map(str, large_numbers))))
+        args = ['./getblocks', self._dbfile,
+                str(self.block_size)] + map(str, block_numbers)
+        print >>self._log, ' '.join(map(safe_argument, args))
+        if self._host == None:
+            P = subprocess.Popen(args, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, cwd=self._pirdir)
+            out, err = P.communicate()
+        else:
+            P = self._host.exec_command(args, self._pirdir)
+            out = P.stdout.read()
+            err = P.stderr.read()
+        retcode = P.wait()
+        if retcode != 0:
+            raise RuntestException('getblocks exited with error code %d and the message:\n%s'
+                                   % (retcode, err))
+        outlist = []
+        offset = 0
+        while offset < len(out):
+            outlist.append(out[offset:offset+self.block_size])
+            offset += self.block_size
+        return outlist
+
+    def get_random_blocks(self, n=1, nodatabase=False):
+        if n < 1:
+            return []
+        block_numbers = []
+        for j in range(n):
+            block_numbers.append(random.randrange(self.num_blocks))
+        if nodatabase:
+            blocks = None
+        else:
+            blocks = self.get_blocks(block_numbers)
+        return block_numbers, blocks
+
+    def sync(self, servers_sid_host_dir):
+        hdpairs = set(map(lambda sid, host, dir: (
+            host, dir), servers_sid_host_dir))
+        for host, pirdir in hdpairs:
+            dest = self._dbfile
+            if pirdir != None:
+                dest = pirdir + ('' if pirdir.endswith('/') else '/') + dest
+            if host == None and self._host != None:
+                dest = os.getcwd().replace(os.path.expanduser('~/'), '', 1) + '/' + dest
+            if host != None:
+                dest = str(host) + ':' + dest
+            elif self._host != None:
+                dest = _localhost + ':' + dest
+                if self._host.user != _user:
+                    dest = _user + '@' + dest
+            if str(self) == dest:
+                continue
+            cmd = ['rsync', '-avz', '--progress', self._dbfile, dest]
+            actual_progress = self._log in [sys.stderr, sys.stdout]
+            print >>self._log, ' '.join(map(safe_argument, cmd))
+            if self._host == None:
+                if actual_progress:
+                    P = subprocess.Popen(
+                        cmd, stdout=self._log, stderr=self._log, cwd=self._pirdir)
+                else:
+                    P = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self._pirdir)
+            else:
+                P = self._host.exec_command(cmd, self._pirdir)
+            try:
+                if P.stdout != None:
+                    line = []
+                    while True:
+                        c = P.stdout.read(1)
+                        if c == '\n':
+                            print >>self._log, ''.join(line)
+                            line = []
+                        elif c == '\r':
+                            if actual_progress:
+                                self._log.write(''.join(line))
+                                self._log.write('\r')
+                            line = []
+                        elif c == '':
+                            self._log.write(''.join(line))
+                            break
+                        else:
+                            line.append(c)
+                    for line in P.stderr:
+                        self._log.write(line)
+                if P.wait() != 0:
+                    raise RuntestException(
+                        'Error syncing database %s with %s' % (self, dest))
+            except Exception as e:
+                P.kill()
+                raise
+
+    def __str__(self):
+        ret = self._dbfile
+        if self._pirdir != None:
+            ret = self._pirdir + \
+                ('' if self._pirdir.endswith('/') else '/') + ret
+        if self._host != None:
+            ret = str(self._host) + ':' + ret
+        return ret
+
+
+class TauDatabase (Database):
+    def __init__(self, dbfile, num_blocks, block_size, tau, num_servers, host=None, pirdir=None, log=devnull):
+        super(TauDatabase, self).__init__(
+            dbfile, num_blocks, block_size, host, pirdir, log)
+        self.tau = tau
+        self.ell = num_servers
+        self.subdbs = {}
+        for sid in range(1, self.ell+1):
+            self.subdbs[sid] = Database(
+                dbfile + '.%d' % (sid), num_blocks, block_size, host, pirdir, log)
+
+    def sync(self, servers_sid_host_dir):
+        sinfo_by_sid = {}
+        for S in servers_sid_host_dir:
+            sinfo_by_sid.setdefault(S[0], []).append(S)
+        for sid in range(1, self.ell+1):
+            self.subdbs[sid].sync(sinfo_by_sid[sid])
+
+    def split(self, args):
+        mode = None
+        size = None
+        if args.mode == 'GF28':
+            mode = 'g'
+        elif args.mode == 'GF216':
+            mode = 's'
+        elif args.mode == 'ZZ_P':
+            mode = 'z'
+            size = args.word_size
+        elif args.mode == 'HYBRID':
+            if args.it_mode == 'GF28':
+                mode = 'g'
+            elif args.it_mode == 'GF216':
+                mode = 's'
+            elif args.it_mode == 'ZZ_P':
+                mode = 'z'
+                size = args.it_word_size
+        if mode == None:
+            raise RuntestException(
+                'Mode %s does not support tau-independence' % (args.mode))
+        cmd = ['./splitdatabase', '-m', mode, self._dbfile, self.tau, self.ell,
+               self.num_blocks * self.block_size]
+        if mode == 'z':
+            cmd.extend(['-w', size])
+        cmd = map(str, cmd)
+        print >>self._log, ' '.join(map(safe_argument, cmd))
+        if self._host == None:
+            P = subprocess.Popen(cmd, stdout=devnull,
+                                 stderr=subprocess.PIPE, cwd=self._pirdir)
+        else:
+            P = self._host.exec_command(cmd, self._pirdir)
+        for line in P.stderr:
+            self._log.write(line)
+        if P.wait() != 0:
+            raise RuntestException('Error spliting database')
+
+
+############################ Create Argument Parser ############################
+
+def hostinfo(s):
+    '''Host information in the form "hostname[:pirdir]".'''
+    fields = s.split(':')
+    if len(fields) > 2 or ' ' in s:
+        raise ValueError('Invalid host info: %s' % (s))
+    addr = fields[0]
+    pirdir = fields[1] if len(fields) > 1 and fields[1] != '' else None
+    return (addr, None, pirdir)
+
+
+def serverinfo(s):
+    '''Server information in the form "hostname[:port[:pirdir]]".'''
+    if hasattr(s, '__iter__'):
+        fields = s
+    elif isinstance(s, str):
+        fields = s.split(':')
+    else:
+        raise ValueError('Invalid server info: %r' % (s))
+    addr, port, pirdir = None, None, None
+    if len(fields) > 3:
+        raise ValueError('Invalid server info: %s' % (s))
+    addr = fields[0]
+    if len(fields) > 1 and fields[1] != '' and fields[1] != None:
+        port = int(fields[1])
+    if len(fields) > 2 and fields[2] != '':
+        pirdir = fields[2]
+    return (addr, port, pirdir)
+
+
+def multihostinfo(s):
+    '''Host information for multiple servers.  Must be a space-delimited list of host information, each in the form "hostname[:port[:pirdir]]".'''
+    if hasattr(s, '__iter__'):
+        servers = s
+    elif isinstance(s, str):
+        servers = s.split()
+    else:
+        raise ValueError('Invalid list of server information')
+    ret = []
+    for server in servers:
+        ret.append(serverinfo(server))
+    return ret
+
+
+def directory(s):
+    '''A directory.'''
+    try:
+        if not os.path.isdir(s):
+            os.makedirs(s)
+    except:
+        raise ValueError('Invalid new or existing directory: %r' % (s))
+    return s
+
+
+def writable_file(s):
+    '''A writeable file.'''
+    try:
+        f = open(s, 'w')
+    except:
+        raise ValueError('Cannot write to file: %s' % (s))
+    return f
+
+
+def databasefile(s):
+    '''String in the form "[HOSTNAME[:PIRDIR]:]DATBASE".'''
+    if hasattr(s, '__iter__'):
+        fields = s
+    elif isinstance(s, str):
+        fields = s.split(':')
+    else:
+        raise ValueError('Invalid database file: %r' % (s))
+    if len(fields) > 2:
+        return (fields[2], fields[0], fields[1])
+    elif len(fields) > 1:
+        return (fields[1], fields[0], None)
+    return (fields[0], None, None)
+
+
+class _DictAction (argparse.Action):
+    def __init__(self, option_strings, dest, type=None, required=False,
+                 help=None, metavar=None):
+        super(_DictAction, self).__init__(option_strings, dest, nargs=2,
+                                          default={}, required=required, help=help, metavar=None)
+        if not hasattr(metavar, '__iter__'):
+            if metavar != None:
+                metavar = map(lambda x: str(metavar) + x, ['_KEY', '_VALUE'])
+            else:
+                metavar = [metavar, metavar]
+        else:
+            metavar = list(metavar)
+        defs = map(lambda x: (
+            dest.upper() if option_strings else dest) + x, ['_KEY', '_VALUE'])
+        for i in (0, 1):
+            if len(metavar) <= i:
+                metavar.append(defs[i])
+            elif metavar[i] == None:
+                metavar[i] = defs[i]
+            else:
+                metavar[i] = str(metavar[i])
+        self.metavar = tuple(metavar[:2])
+        if not hasattr(type, '__iter__'):
+            type = [type, type]
+        else:
+            type = list(type)
+        defs = (str, str)
+        for i in (0, 1):
+            if len(type) <= i:
+                type.append(defs[i])
+            elif type[i] == None:
+                type[i] = defs[i]
+            elif not hasattr(type[i], '__call__'):
+                raise ValueError('type if not callable: %s' % (type[i]))
+        self.types = type
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        dct = argparse._ensure_value(namespace, self.dest, {}).copy()
+        pair = argparse._copy.copy(values)
+        for i in (0, 1):
+            try:
+                pair[i] = self.types[i](values[i])
+            except:
+                raise argparse.ArgumentError(self, 'invalid %s value: %r' % (
+                    getattr(self.types[i], '__name__', repr(self.types[i])), values[i]))
+        dct[pair[0]] = pair[1]
+        setattr(namespace, self.dest, dct)
+
+
+_common_opt_auto = [
+    _StoreAction(['-M', '--main-host'], 'main_host', type=hostinfo, default='localhost', metavar='HOSTNAME[:PIRDIR]',
+                 help='The host on which all clients and servers will be run on.'),
+    _StoreAction(['-C', '--client-host'], 'client_host', type=hostinfo, metavar='HOSTNAME[:PIRDIR]',
+                 help='The host on which the client will be run.  Overrides --main-host.'),
+    _StoreAction(['--server-host'], 'server_host', type=hostinfo, metavar='HOSTNAME[:PIRDIR]',
+                 help='The host on which to run all the servers.  Overrides --main-host.'),
+    _StoreAction(['-S', '--server-hosts'], 'server_hosts', type=multihostinfo, metavar='"HOSTNAME1[:PORT1[:PIRDIR1]] ..."',
+                 help='The host(s) on which to run the servers.  Overrides --main-host and --server-host'),
+    _StoreAction(['-p', '--start-port'], 'start_port', type=pos_int, default=31337,
+                 help='When server ports are not specified, use ports starting at this number.'),
+    _StoreAction(['-P', '--num-try-ports'], 'num_try_ports', type=pos_int, default=1000,
+                 help='When server ports are not specified, try this many ports starting at --start-port.'),
+    _DictAction(['-W', '--workers'], 'workers', type=(nat, multihostinfo), metavar=('INDEX', '"HOSTNAME1[:PORT1[:PIRDIR1]] ..."'),
+                help='Specify the workers to be used for a given server.'),
+    _StoreAction(["-D", "--database"], 'database', type=databasefile, default="database", metavar="[HOSTNAME[:PIRDIR]:]DATABASE",
+                 help='The database file.'),
+    _StoreAction(["-L", "--log-dir"], 'log_dir', type=directory,
+                 help="The directory where log files will be saved."),
+    _StoreAction(["-O", "--output-to-file"], 'output_to_file', type=writable_file,
+                 help="Save the output from the client and servers in the given file."),
+    _StoreTrueAction(["--tau-split"], 'tau_split',
+                     help="If tau is set, split the database before running the tests."),
+    _StoreAction(["--timeout"], 'timeout', type=nat, default=0,
+                 help="Time out each test after the given number of seconds.  A value of zero means no timeout."),
+    _StoreAction(["--id"], 'id',
+                 help="ID for this test.  If not specified, a timestamp will be used."),
+    _StoreTrueAction(["-0", "--null-client"], 'null_client',
+                     help="Run a dummmy client that sends random bytes to the server."),
+    _StoreTrueAction(["--no-check-output"], 'no_check_output',
+                     help="Run a dummmy client that sends random bytes to the server."),
+    _StoreTrueAction(["--valgrind"], 'valgrind',
+                     help="Run valgrind on the client and servers.  Implies --verbose and --num-tests 1."),
+    _StoreAction(["--numa-nodes"], 'numa_nodes', type=nat, default=0,
+                 help="Split servers evenly over this number of numa nodes. (Default: 0, no numactl)"),
+    _StoreTrueAction(['--no-suppression'], 'no_suppression',
+                     help="If using the --valgrind flag, do not suppress any errors."),
+    _StoreTrueAction(["--no-run"], 'no_run',
+                     help="Do not run the client or servers, but only output commands.  Implies --verbose and --num-tests 1."),
+    _StoreTrueAction(["--no-sync"], 'no_sync',
+                     help="Do not sync the database on all remote hosts before running the tests."),
+    _StoreTrueAction(["--verbose"], 'verbose',
+                     help="Show the stderr output of the client and server(s) and show some debugging info."),
+    _HelpAction(["--help"], 'help', help="Show help message and exit.")
+]
+
+
+class _MyHelpFormatter (argparse.HelpFormatter):
+    def __init__(self, prog, width=None):
+        try:
+            import fcntl
+            import termios
+            import struct
+            h, w = struct.unpack('hh', fcntl.ioctl(
+                0, termios.TIOCGWINSZ, '1234'))
+            width = w
+        except:
+            pass
+        super(_MyHelpFormatter, self).__init__(
+            prog, indent_increment=4, max_help_position=8, width=width)
+
+    def add_usage(self, usage, actions, groups, prefix='Usage: '):
+        super(_MyHelpFormatter, self).add_usage(usage, actions, groups, prefix)
+
+    def _get_help_string(self, action):
+        help = ''
+        if action.help != None:
+            help += action.help
+        if action.type != None:
+            help += '\nType: ' + get_type_doc(action.type)
+        if action.choices != None:
+            help += '\nChoices: ' + ', '.join(map(str, action.choices))
+        if action.default != None and action.default != argparse.SUPPRESS and action.nargs != 0:
+            help += '\nDefault: ' + str(action.default)
+        return help
+
+    def _split_lines(self, text, width):
+        lines = text.splitlines()
+        ret = []
+        for line in lines:
+            isfield = reduce(bool.__or__, map(lambda x: line.startswith(x), [
+                             'Type:', 'Default:', 'Choices:']))
+            if line == '':
+                ret.append('')
+            ret.extend(_textwrap.wrap(
+                line, width, subsequent_indent=('    ' if isfield else '')))
+        # ret.append('')
+        return ret
+
+    def _fill_text(self, text, width, indent):
+        lines = text.splitlines()
+        if len(lines) == 0:
+            return ''
+        ret = ''
+        for line in lines[:-1]:
+            ret += _textwrap.fill(line, width,
+                                  initial_indent=indent, subsequent_indent=indent)
+            ret += '\n'
+        ret += _textwrap.fill(lines[-1], width,
+                              initial_indent=indent, subsequent_indent=indent)
+        return ret
+
+    def _metavar_formatter(self, action, default_metavar):
+        result = default_metavar if action.metavar == None else action.metavar
+
+        def format(tuple_size):
+            if isinstance(result, tuple):
+                return result
+            else:
+                return (result, ) * tuple_size
+        return format
+
+    def _format_action_invocation(self, action):
+        ret = self._format_args(action, action.dest)
+        if action.option_strings:
+            ret = ret.upper()
+        first = True
+        for optstr in reversed(action.option_strings):
+            ret = optstr + (' ' if first else ', ') + ret
+            first = False
+        return ret
+
+
+_cmdline_parser = ArgumentParser(add_help=False)
+_cmdline_parser.add_argument("--help", action='help',
+                             help="Show this help message and exit.")
+_subparsers = _cmdline_parser.add_subparsers(
+    title="valid modes", dest="mode", metavar="mode", description="The PIR protocol to use.")
+_cmdline_parser._optionals.title = 'options'
+
+_cmdline_parser.description = '''Run a set of PIR tests in a specific mode.  Run "%s mode --help" for one of the valid modes to get more information about required and optional arguments.''' % (
+    _cmdline_parser.prog)
+
+_mode_com_req, _mode_com_opt, _mode_spec_req, _mode_spec_opt = {}, {}, {}, {}
+for mode, helpmsg in sorted(_modes.items()):
+    _subparser = _subparsers.add_parser(mode, help=helpmsg, add_help=False)
+    _subparser.formatter_class = _MyHelpFormatter
+    # _subparser.formatter_class=argparse.RawDescriptionHelpFormatter
+    _subparser.description = '''Run a set of PIR tests in the %s mode for the arguments specified below.\n\nThis script requires the python paramiko module (http://www.lag.net/paramiko/).  Remote servers can be specified as either a hostname, ip address or ssh host.  This script reads ~/.ssh/config to get all possible ssh hosts.  Additionally, you may specify host properties in hosts.cfg.  In hosts.cfg, users should specify PIRDir (the directory of Percy++ executables) and DatabaseFile (the database file to use) for each host.'''
+    _subparser.set_defaults(mode=mode)
+    _mode_com_req[mode] = _subparser.add_argument_group(
+        'common required arguments')
+    _mode_com_opt[mode] = _subparser.add_argument_group(
+        'common optional arguments')
+    _mode_spec_req[mode] = _subparser.add_argument_group(
+        'mode-specific required arguments')
+    _mode_spec_opt[mode] = _subparser.add_argument_group(
+        'mode-specific optional arguments')
+_mode_parsers = _subparsers._name_parser_map
+
+for action in _common_required:
+    action.required = True
+    for mode, parser in _mode_com_req.items():
+        parser._add_action(action)
+
+for action in _common_optional:
+    for mode, parser in _mode_com_opt.items():
+        parser._add_action(action)
+
+for action in _common_opt_auto:
+    for mode, parser in _mode_com_opt.items():
+        parser._add_action(action)
+
+for (modes, action) in _mode_specific_required:
+    action.required = True
+    for mode in modes:
+        _mode_spec_req[mode]._add_action(action)
+
+for (modes, action) in _mode_specific_optional:
+    for mode in modes:
+        _mode_spec_opt[mode]._add_action(action)
+
+# Clean Up Mode-Specific Help Message
+for (mode, parser_mode) in _mode_parsers.items():
+    positionals_mode = map(
+        lambda x: x.dest, _mode_com_req[mode]._group_actions + _mode_spec_req[mode]._group_actions)
+    parser_mode.usage = '%(prog)s [options] ' + ' '.join(positionals_mode)
+
+
+def _check_arg_len(args, action):
+    nargs = action.nargs
+    if nargs == None:
+        return len(args) == 1
+    elif nargs == '?':
+        return len(args) < 2
+    elif nargs == '*' or nargs == '...':
+        return True
+    elif nargs == '+':
+        return len(args) > 0
+    return len(args) == int(nargs)
+
+
+def _check_dict(arg_dict):
+    D = arg_dict.copy()
+    if not isinstance(D, dict):
+        raise TypeError('check_dict argument must be a dict')
+    N = Namespace()
+    N.mode = D.pop('mode', None)
+    if N.mode == None:
+        raise RuntestException('Test must contain a mode')
+    if N.mode not in _mode_parsers:
+        raise RuntestException('Not a valid mode: %s' % (N.mode))
+    subparser = _mode_parsers[N.mode]
+    command_positional = []
+    command_optional = []
+    for action in subparser._actions:
+        if isinstance(action, _HelpAction):
+            continue
+        is_positional = action in subparser._get_positional_actions()
+        key, val = None, None
+        for trykey in [action.dest] + action.option_strings + [action.metavar]:
+            if trykey in D:
+                key, val = trykey, D.pop(trykey)
+                break
+        if key == None or val == None:
+            if action.required:
+                raise RuntestException(
+                    'Argument %s is required.' % (action.dest))
+            if action.default == argparse.SUPPRESS:
+                continue
+            if isinstance(action.default, basestring):
+                val = subparser._get_value(action, action.default)
+            else:
+                val = action.default
+            N.__setattr__(action.dest, val)
+            continue
+        elif isinstance(action, _StoreTrueAction) or isinstance(action, _StoreFalseAction):
+            if not isinstance(val, bool):
+                raise RuntestException('Argument %s must be a bool' % (key))
+            N.__setattr__(action.dest, val)
+            if isinstance(action, _StoreTrueAction) == val:
+                if is_positional:
+                    command_positional.append(val)
+                else:
+                    command_optional.append(action.option_strings[0])
+            continue
+        elif isinstance(action, _DictAction):
+            try:
+                val = dict(val)
+            except:
+                raise RuntestException('Argument %s must be a dict' % (key))
+            for pair in val.items():
+                action(subparser, N, list(pair))
+            for (key, val) in val.items():
+                if is_positional:
+                    command_positional.extend([key, val])
+                else:
+                    command_optional.extend(
+                        [action.option_strings[0], key, val])
+            continue
+        elif isinstance(action, _AppendAction):
+            if not hasattr(val, '__iter__'):
+                raise RuntestException('Argument %s must be iterable' % (key))
+            val = [subparser._get_values(v, action) for v in val]
+            for v in val:
+                if isinstance(val, list) or isinstance(val, tuple):
+                    valstrs = map(str, val)
+                else:
+                    valstrs = [str(val)]
+                if not _check_arg_len(valstrs, action):
+                    raise RuntestException(
+                        'Incorrect number of arguments for key %s' % (key))
+                try:
+                    values = subparser._get_values(action, valstrs)
+                except Exception as e:
+                    raise e
+                if values is not argparse.SUPPRESS:
+                    action(subparser, N, values)
+        elif isinstance(action, _CountAction):
+            try:
+                val = nat(val)
+            except:
+                raise RuntestException('Argument %s must be a nat' % (key))
+            N.__setattr__(action.dest, val)
+        else:
+            if isinstance(val, list) or isinstance(val, tuple):
+                valstrs = map(str, val)
+            else:
+                valstrs = [str(val)]
+            if not _check_arg_len(valstrs, action):
+                raise RuntestException(
+                    'Incorrect number of arguments for key %s' % (key))
+            try:
+                values = subparser._get_values(action, valstrs)
+            except Exception as e:
+                raise e
+            if values is not argparse.SUPPRESS:
+                action(subparser, N, values)
+        if is_positional:
+            command_positional.append(val)
+        else:
+            command_optional.extend([action.option_strings[0], val])
+    if len(filter(lambda x: x != None, D.values())) > 0:
+        raise RuntestException('Unrecognized arguments: %s' % (D))
+    return N, [N.mode] + command_optional + command_positional
+
+
+def print_argument_info(outfile=sys.stderr, width=None):
+    def print_action_info(action, modes=None, outfile=sys.stderr, width=80):
+        if isinstance(action, _HelpAction):
+            return
+
+        def wrap(text, width):
+            return _textwrap.fill(text, width, initial_indent='    ', subsequent_indent='        ')
+        print >>outfile, action.dest
+        typedoc = get_type_doc(action.type)
+        if action.dest == 'mode':
+            print >>outfile, wrap(
+                'Description: The PIR protocol to use.', width)
+            print >>outfile, wrap(
+                'Choices: ' + ', '.join(map(str, action.choices)), width)
+            print >>outfile, wrap('* Required', width)
+            return
+        if action.help != None:
+            print >>outfile, wrap('Description: ' + action.help %
+                                  dict(action._get_kwargs()), width)
+        if isinstance(action, _StoreTrueAction):
+            print >>outfile, wrap('Type: bool', width)
+            print >>outfile, wrap('Default: False', width)
+        elif isinstance(action, _StoreFalseAction):
+            print >>outfile, wrap('Type: bool', width)
+            print >>outfile, wrap('Default: True', width)
+        elif isinstance(action, _DictAction):
+            print >>outfile, wrap('Type: Dictionary of: (%s, %s)' % tuple(
+                map(get_type_doc, action.types)), width)
+            print >>outfile, wrap('Default: {}', width)
+        elif isinstance(action, _AppendAction):
+            if action.type != None:
+                print >>outfile, wrap('Type: List of: ' + typedoc, width)
+            print >>outfile, wrap('Number of Arguments: *', width)
+            if action.choices != None:
+                print >>outfile, wrap(
+                    'Choices: ' + ', '.join(map(str, action.choices)), width)
+            if action.default != None:
+                print >>outfile, wrap('Default: ' + str(action.default), width)
+        elif isinstance(action, _CountAction):
+            print >>outfile, wrap('Type: ' + get_type_doc(nat), width)
+            if action.default != None:
+                print >>outfile, wrap('Default: ' + str(action.default), width)
+        else:
+            if action.type != None:
+                print >>outfile, wrap('Type: ' + typedoc, width)
+            if action.nargs != None:
+                print >>outfile, wrap(
+                    'Number of Arguments: ' + str(action.nargs), width)
+            if action.choices != None:
+                print >>outfile, wrap(
+                    'Choices: ' + ', '.join(map(str, action.choices)), width)
+            if action.default != None:
+                print >>outfile, wrap('Default: ' + str(action.default), width)
+        if modes != None:
+            print >>outfile, wrap(
+                ('* Required' if action.required else 'Valid') + ' for Modes: ' + ', '.join(modes), width)
+        elif action.required:
+            print >>outfile, wrap('* Required', width)
+    if width == None:
+        try:
+            import fcntl
+            import termios
+            import struct
+            h, w = struct.unpack('hh', fcntl.ioctl(
+                0, termios.TIOCGWINSZ, '1234'))
+            width = w
+        except:
+            try:
+                width = int(os.environ['COLUMNS'])
+            except:
+                width = 80
+    actions = [('modes', None, _cmdline_parser._actions[1])]
+    for action in _common_required + _common_optional + _common_opt_auto:
+        actions.append((action.dest, None, action))
+    for modes, action in _mode_specific_required + _mode_specific_optional:
+        actions.append((action.dest, modes, action))
+    actions.sort()
+    for key, modes, action in actions:
+        print_action_info(action, modes, outfile, width)
+
+
+################################## TEST OBJECT #################################
+
+class TimeoutError (Exception):
+    pass
+
+
+class timeout (object):
+    def __init__(self, seconds=1, error_message='Timeout'):
+        self.seconds = seconds
+        self.msg = error_message
+
+    def handle_timeout(self, signum, frame):
+        raise TimeoutError(self.msg)
+
+    def __enter__(self):
+        if self.seconds > 0:
+            signal.signal(signal.SIGALRM, self.handle_timeout)
+            signal.alarm(self.seconds)
+
+    def __exit__(self, extype, exval, tb):
+        if self.seconds > 0:
+            signal.alarm(0)
+
+
+def _get_used_ports(host=None):
+    if host == None:
+        P = subprocess.Popen(['netstat', '-ant'],
+                             stdout=subprocess.PIPE, stderr=devnull)
+        out, err = P.communicate()
+    else:
+        process = host.exec_command('netstat -ant')
+        out = process.stdout.read()
+    usedports = map(lambda x: int(
+        x.split()[3].split(':')[-1]), out.split('\n')[2:-1])
+    return set(usedports)
+
+
+_start_port = 31337
+_num_try_ports = 1000
+
+
+class Test (object):
+
+    def __init__(self, arg):
+        args = Namespace()
+        if isinstance(arg, str):
+            self._cmdline_args = shlex.split(arg)
+            _cmdline_parser.parse_args(self._cmdline_args, namespace=args)
+        elif isinstance(arg, list):
+            self._cmdline_args = arg
+            _cmdline_parser.parse_args(arg, namespace=args)
+        elif isinstance(arg, dict):
+            args, self._cmdline_args = _check_dict(arg)
+        elif isinstance(arg, Namespace):
+            args, self._cmdline_args = _check_dict(dict(arg._get_kwargs()))
+        else:
+            raise TypeError(
+                'The argument to Test() must be a str, list, dict, or Namespace')
+        if args.id == None:
+            args.id = int(time.time())
+        if 'num_servers' not in args:
+            args.num_servers = 1
+        if 'tau' not in args:
+            args.tau = 0
+        self.num_tests = args.num_tests
+        self.num_queries = args.num_queries
+        self.testsrun = 0
+        self.fails = 0
+        self.timeouts = 0
+        self.time = 0
+        self.starttime = None
+        self._output_file = args.output_to_file
+        self._statsdir = args.log_dir
+        self._verbose = args.verbose
+        self._valgrind = args.valgrind
+        if args.valgrind or args.no_run:
+            self._verbose = True
+            self.num_tests = 1
+        self._no_run = args.no_run
+        self._null_client = args.null_client
+        self._no_check_output = args.no_check_output or args.null_client
+        self.exmessage = None
+        self.timeout = args.timeout
+
+        self.id = args.id
+        self._serverlogs = {}
+        self._workerlogs = {}
+        if self._output_file:
+            self._databaselog = open('/tmp/%s.database.err' % (self.id), 'w')
+            self._clientlog = open('/tmp/%s.client.err' % (self.id), 'w')
+            for sid in range(1, args.num_servers + 1):
+                self._serverlogs[sid] = open(
+                    '/tmp/%s.server%d.err' % (self.id, sid), 'w')
+            for s, workers in args.workers.items():
+                self._workerlogs[s] = []
+                for i in xrange(len(workers)):
+                    self._workerlogs[s].append(
+                        open('/tmp/%s.server%d.worker%d.err' % (self.id, s+1, i), 'w'))
+        elif self._verbose:
+            self._databaselog = sys.stderr
+            self._clientlog = sys.stderr
+            for sid in range(1, args.num_servers + 1):
+                self._serverlogs[sid] = sys.stderr
+            for s, workers in args.workers.items():
+                self._workerlogs[s] = []
+                for i in xrange(len(workers)):
+                    self._workerlogs[s].append(sys.stderr)
+        else:
+            self._databaselog = devnull
+            self._clientlog = devnull
+            for sid in range(1, args.num_servers + 1):
+                self._serverlogs[sid] = devnull
+            for s, workers in args.workers.items():
+                self._workerlogs[s] = []
+                for i in xrange(len(workers)):
+                    self._workerlogs[s].append(devnull)
+
+        self._hostset = {}
+        used_ports = {}
+
+        # Get database information
+        dbfile, host, dbpirdir = args.database
+        if host == None:
+            host = 'localhost'
+        config = _ssh_config.lookup(host)
+        addr = config.get('hostname', host)
+        if addr in ['localhost', '127.0.0.1', _localhost]:
+            addr = 'localhost'
+        if addr not in self._hostset:
+            if addr == 'localhost':
+                dbhost = None
+            else:
+                try:
+                    dbhost = sshclient.RemoteHost(host, config)
+                except KeyboardInterrupt:
+                    raise
+                except:
+                    raise RuntestException(
+                        'Error connecting to host: %s' % (host))
+            self._hostset[addr] = dbhost
+        else:
+            dbhost = self._hostset[addr]
+        if dbpirdir == None:
+            dbpirdir = config.get('pirdir', None)
+
+        # Create Database object
+        if args.tau > 0:
+            self.database = TauDatabase(dbfile, args.num_blocks, args.block_size, args.tau,
+                                        args.num_servers, host=dbhost, pirdir=dbpirdir, log=self._databaselog)
+            if args.tau_split:
+                print >>sys.stderr, 'Splitting the database for tau-independence.  This may take a while if the database is large.'
+                try:
+                    self.database.split(args)
+                except:
+                    print >>sys.stderr, 'Error splitting the database'
+                    self._no_run = True
+                    args.no_run = True
+        else:
+            self.database = Database(dbfile, args.num_blocks, args.block_size,
+                                     host=dbhost, pirdir=dbpirdir, log=self._databaselog)
+
+        # Get server information
+        serveraddrs, serverhosts, serverports, serverpirdirs = [], [], [], []
+        for i in range(args.num_servers):
+            serverinfo = args.main_host
+            if args.server_host != None:
+                serverinfo = args.server_host
+            if args.server_hosts != None and len(args.server_hosts) > i:
+                serverinfo = args.server_hosts[i]
+            host, port, pirdir = serverinfo
+            config = _ssh_config.lookup(host)
+            addr = config.get('hostname', host)
+            serveraddrs.append(addr)
+            if addr in ['localhost', '127.0.0.1', _localhost]:
+                addr = 'localhost'
+            if addr not in self._hostset:
+                if addr == 'localhost':
+                    rhost = None
+                else:
+                    try:
+                        rhost = sshclient.RemoteHost(host, config)
+                    except KeyboardInterrupt:
+                        raise
+                    except:
+                        raise RuntestException(
+                            'Error connecting to host: %s' % (host))
+                serverhosts.append(rhost)
+                self._hostset[addr] = rhost
+            else:
+                serverhosts.append(self._hostset[addr])
+            if addr not in used_ports:
+                used_ports[addr] = _get_used_ports(serverhosts[-1])
+            if port != None:
+                if port in used_ports[addr]:
+                    raise RuntestException(
+                        'Port %d being used by another server on host %s' % (port, host))
+                used_ports[addr].add(port)
+            serverports.append(port)
+            if pirdir == None:
+                pirdir = config.get('pirdir', None)
+            serverpirdirs.append(pirdir)
+
+        # Get worker information
+        workeraddrs, workerhosts, workerports, workerpirdirs = {}, {}, {}, {}
+        for sindex, workers in args.workers.items():
+            waddrs, whosts, wports, wpirdirs = [], [], [], []
+            for worker in workers:
+                host, port, pirdir = worker
+                config = _ssh_config.lookup(host)
+                addr = config.get('hostname', host)
+                waddrs.append(addr)
+                if addr in ['localhost', '127.0.0.1', _localhost]:
+                    addr = 'localhost'
+                if addr not in self._hostset:
+                    if addr == 'localhost':
+                        rhost = None
+                    else:
+                        try:
+                            rhost = sshclient.RemoteHost(host, config)
+                        except KeyboardInterrupt:
+                            raise
+                        except:
+                            raise RuntestException(
+                                'Error connecting to host: %s' % (host))
+                    whosts.append(rhost)
+                    self._hostset[addr] = rhost
+                else:
+                    whosts.append(self._hostset[addr])
+                if addr not in used_ports:
+                    used_ports[addr] = _get_used_ports(whosts[-1])
+                if port != None:
+                    if port in used_ports[addr]:
+                        raise RuntestException(
+                            'Port %d being used by another server on host %s' % (port, host))
+                    used_ports[addr].add(port)
+                wports.append(port)
+                if pirdir == None:
+                    pirdir = config.get('pirdir', None)
+                wpirdirs.append(pirdir)
+            workeraddrs[sindex] = waddrs
+            workerhosts[sindex] = whosts
+            workerports[sindex] = wports
+            workerpirdirs[sindex] = wpirdirs
+
+        # Assign ports not specified
+        for i in range(args.num_servers):
+            addr = serveraddrs[i]
+            if serverports[i] == None:
+                for p in range(args.start_port, args.start_port + args.num_try_ports):
+                    if p not in used_ports[addr]:
+                        serverports[i] = p
+                        used_ports[addr].add(p)
+                        break
+                if serverports[i] == None:
+                    raise RuntestException(
+                        'Could not find a free port on %s' % (addr))
+        for sindex, wports in workerports.items():
+            for i in range(len(wports)):
+                addr = workeraddrs[sindex][i]
+                if wports[i] == None:
+                    for p in range(args.start_port, args.start_port + args.num_try_ports):
+                        if p not in used_ports[addr]:
+                            wports[i] = p
+                            used_ports[addr].add(p)
+                            break
+                    if wports[i] == None:
+                        raise RuntestException(
+                            'Could not find a free port on %s' % (addr))
+
+        # Sync database over servers
+        if not self._no_check_output and not args.no_sync and not args.no_run:
+            print >>sys.stderr, 'Syncing database.  This may take a while if the database is large.'
+            servers_sid_host_dir = map(None, range(
+                1, args.num_servers+1), serverhosts, serverpirdirs)
+            for sindex in args.workers:
+                servers_sid_host_dir.extend(
+                    map(lambda x, y: (sindex+1, x, y), workerhosts[sindex], workerpirdirs[sindex]))
+            self.database.sync(servers_sid_host_dir)
+
+        # Create Worker objects
+        self.workers = {}
+        for s, workerinfo in args.workers.items():
+            workers = []
+            num_workers = len(workerinfo)
+            for i, host, port, pirdir in zip(range(num_workers), workerhosts[s], workerports[s], workerpirdirs[s]):
+                workers.append(Worker(args, s+1, port, dbfile, num_workers,
+                               i, host=host, pirdir=pirdir, log=self._workerlogs[s][i]))
+            self.workers[s] = workers
+
+        # Create Server (or Master) objects
+        self.servers = []
+        for i, host, port, pirdir in zip(range(args.num_servers), serverhosts, serverports, serverpirdirs):
+            sid = i + 1
+            if i in args.workers:
+                self.servers.append(Master(
+                    args, sid, port, self.workers[i], host=host, pirdir=pirdir, log=self._serverlogs[sid]))
+            else:
+                self.servers.append(Server(
+                    args, sid, port, dbfile, host=host, pirdir=pirdir, log=self._serverlogs[sid]))
+
+        # Get client information
+        clientinfo = args.main_host
+        if args.client_host != None:
+            clientinfo = args.client_host
+        host, _, clientpirdir = clientinfo
+        config = _ssh_config.lookup(host)
+        addr = config.get('hostname', host)
+        if addr in ['localhost', '127.0.0.1', _localhost]:
+            addr = 'localhost'
+        if addr not in self._hostset:
+            if addr == 'localhost':
+                clienthost = None
+            else:
+                try:
+                    clienthost = sshclient.RemoteHost(host, config)
+                except KeyboardInterrupt:
+                    raise
+                except:
+                    raise RuntestException(
+                        'Error connecting to host: %s' % (host))
+            self._hostset[addr] = clienthost
+        else:
+            clienthost = self._hostset[addr]
+        if clientpirdir == None:
+            clientpirdir = config.get('pirdir', None)
+
+        # Create Client object
+        serverstr = ' '.join([s.infostr() for s in self.servers])
+        self.client = Client(args, serverstr, host=clienthost,
+                             pirdir=clientpirdir, log=self._clientlog)
+
+    def run(self):
+        if self._no_run:
+            for s in range(len(self.servers)):
+                if s in self.workers:
+                    for w in range(len(self.workers[s])):
+                        print >>self._workerlogs[s][w], self.workers[s][w].get_command(
+                        ), '&'
+                print >>self._serverlogs[s +
+                                         1], self.servers[s].get_command(), '&'
+            block_numbers, blocks = self.database.get_random_blocks(
+                self.num_queries, True)
+            print >>self._clientlog, self.client.get_command(block_numbers)
+            return 0
+        startfails = self.fails
+        self.starttime = time.time()
+        for i in range(self.num_tests):
+            block_numbers, actual = self.database.get_random_blocks(
+                self.num_queries, self._no_check_output)
+            print >>sys.stderr, 'Fetching blocks', block_numbers, '...',
+            try:
+                with timeout(self.timeout):
+                    out = self.client.run(block_numbers)
+                    if self._valgrind:
+                        for server in self.servers:
+                            if server.get_exit_code(True) == 255:
+                                raise ValgrindError()
+                        for s in self.workers:
+                            for worker in self.workers[s]:
+                                if worker.get_exit_code(True) == 255:
+                                    raise ValgrindError()
+                    i = 0
+            except TimeoutError as e:
+                self.timeouts += 1
+                print >>sys.stderr, 'TIMEOUT'
+                self.testsrun += 1
+                self.client.stop()
+                for server in self.servers:
+                    server.stop_children()
+                for s in self.workers:
+                    for worker in self.workers[s]:
+                        worker.stop_children()
+                continue
+            except ValgrindError as e:
+                self.fails += 1
+                print >>sys.stderr, 'VALGRIND ERROR'
+                self.testsrun += 1
+                continue
+            try:
+                if self._no_check_output:
+                    print >>sys.stderr, 'DONE'
+                else:
+                    for block in actual:
+                        while True:
+                            if out[i] == block:
+                                break
+                            i += 1
+                    print >>sys.stderr, 'PASSED'
+            except:
+                self.fails += 1
+                print >>sys.stderr, 'FAILED'
+            self.testsrun += 1
+        endtime = time.time()
+        self.time += endtime - self.starttime
+        self.starttime = None
+        return self.fails - startfails
+
+    def print_log(self, outfile, cstats=None, sstats=None, wstats=None):
+        print >>outfile, '=' * 80
+        if self.exmessage != None:
+            outfile.write(self.exmessage)
+            print >>outfile, '-' * 80
+        # stats
+        print >>outfile, 'Total Tests:'.ljust(29), self.testsrun
+        print >>outfile, 'Queries Per Test:'.ljust(29), self.num_queries
+        print >>outfile, 'Total Queries:'.ljust(
+            29), self.testsrun * self.num_queries
+        print >>outfile, 'Tests Passed:'.ljust(29), self.testsrun - self.fails
+        print >>outfile, 'Tests Failed:'.ljust(29), self.fails
+        print >>outfile, 'Tests Timed Out:'.ljust(29), self.timeouts
+        print >>outfile, 'Total Time:'.ljust(
+            29), datetime.timedelta(seconds=self.time)
+        # client
+        print >>outfile, '=' * 80
+        print >>outfile, 'Client', '(%s)' % (
+            self.client._host if self.client._host != None else 'localhost')
+        if cstats != None:
+            print >>outfile, '-' * 80
+            outfile.write(cstats)
+        print >>outfile, '-' * 80
+        try:
+            with open(self._clientlog.name, 'r') as errfile:
+                for line in errfile.readlines():
+                    outfile.write(line)
+                print >>outfile  # just in case no newline at end
+        except:
+            print >>outfile, 'Error capturing output'
+        # servers
+        for s in range(len(self.servers)):
+            server = self.servers[s]
+            sid = s + 1
+            serverlog = self._serverlogs[sid]
+            print >>outfile, '=' * 80
+            print >>outfile, 'Server', s, '(%s)' % (
+                server._host if server._host != None else 'localhost')
+            if sstats != None and sstats.has_key(sid):
+                print >>outfile, '-' * 80
+                outfile.write(sstats[sid])
+            print >>outfile, '-' * 80
+            try:
+                with open(serverlog.name, 'r') as errfile:
+                    for line in errfile.readlines():
+                        outfile.write(line)
+                    print >>outfile  # just in case no newline at end
+            except:
+                print >>outfile, 'Error capturing output'
+            # workers
+            for i in range(0 if s not in self.workers else len(self.workers[s])):
+                worker = self.workers[s][i]
+                workerlog = self._workerlogs[s][i]
+                print >>outfile, '=' * 80
+                print >>outfile, 'Worker', i, 'of Server', s, '(%s)' % (
+                    worker._host if worker._host != None else 'localhost')
+                if wstats != None and wstats.has_key(s) and i < len(wstats[s]):
+                    print >>outfile, '-' * 80
+                    outfile.write(wstats[s][i])
+                print >>outfile, '-' * 80
+                try:
+                    with open(workerlog.name, 'r') as errfile:
+                        for line in errfile.xreadlines():
+                            outfile.write(line)
+                        print >>outfile  # just in case no newline at end
+                except:
+                    print >>outfile, 'Error capturing output'
+        # database
+        print >>outfile, '=' * 80
+        if not self._no_check_output:
+            print >>outfile, 'Database', '(%s)' % (self.database)
+            print >>outfile, '-' * 80
+            try:
+                with open(self._databaselog.name, 'r') as errfile:
+                    for line in errfile.readlines():
+                        outfile.write(line)
+                    print >>outfile  # just in case no newline at end
+            except:
+                print >>outfile, 'Error capturing output'
+            print >>outfile, '=' * 80
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, extype, exval, tb):
+        if extype == None:
+            self.exmessage = None
+        elif extype in [KeyboardInterrupt, RuntestWarning, RuntestException]:
+            self.exmessage = ''.join(
+                traceback.format_exception_only(extype, exval))
+        else:
+            traceback.print_exception(extype, exval, tb)
+            self.exmessage = ''.join(
+                traceback.format_exception(extype, exval, tb))
+        self.finish()
+        return False
+
+    def finish(self):
+        if self.starttime != None:
+            endtime = time.time()
+            self.time += endtime - self.starttime
+        cret, cstats = self.client.stop()
+        sret, sstats = {}, {}
+        for server in self.servers:
+            sid = server.sid
+            sret[sid], sstats[sid] = server.stop()
+        wret, wstats = {}, {}
+        for s, workers in self.workers.items():
+            wret[s], wstats[s] = [], []
+            for worker in workers:
+                ret, stats = worker.stop()
+                wret[s].append(ret)
+                wstats[s].append(stats)
+        for addr, host in self._hostset.items():
+            if host != None:
+                host.close()
+        if self._statsdir != None:
+            try:
+                with open('%s/client.stats' % (self._statsdir), 'a') as statsfile:
+                    statsfile.write(cstats)
+            except:
+                print >>sys.stderr, 'Error writing to %s/client.stats.' % (
+                    self._statsdir)
+            for s in range(len(self.servers)):
+                try:
+                    with open('%s/server%d.stats' % (self._statsdir, s), 'a') as statsfile:
+                        statsfile.write(sstats[s+1])
+                except Exception as e:
+                    print >>sys.stderr, 'Error writing to %s/server%d.stats.' % (
+                        self._statsdir, s)
+            for s in wstats:
+                for i in range(len(wstats[s])):
+                    try:
+                        with open('%s/server%d.worker%d.stats' % (self._statsdir, s, i), 'a') as statsfile:
+                            statsfile.write(wstats[s][i])
+                    except Exception as e:
+                        print >>sys.stderr, 'Error writing to %s/server%d.worker%d.stats' % (
+                            self._statsdir, s, i)
+        if self._output_file:
+            self._databaselog.close()
+            self._clientlog.close()
+            for serverlog in self._serverlogs.values():
+                serverlog.close()
+            for s, workerlogs in self._workerlogs.items():
+                for workerlog in workerlogs:
+                    workerlog.close()
+            try:
+                self.print_log(self._output_file, cstats, sstats, wstats)
+                self._output_file.close()
+            except Exception as e:
+                raise
+                print >>sys.stderr, 'Error writing to file:', self._output_file.name
+            try:
+                os.remove(self._databaselog.name)
+            except:
+                print >>sys.stderr, 'Could not delete', self._databaselog.name
+            try:
+                os.remove(self._clientlog.name)
+            except:
+                print >>sys.stderr, 'Could not delete', self._clientlog.name
+            for serverlog in self._serverlogs.values():
+                try:
+                    os.remove(serverlog.name)
+                except:
+                    print >>sys.stderr, 'Could not delete', serverlog.name
+            for s, workerlogs in self._workerlogs.items():
+                for workerlog in workerlogs:
+                    try:
+                        os.remove(workerlog.name)
+                    except:
+                        print >>sys.stderr, 'Could not delete', workerlog.name
+            self._output_file.close()
+
+
+############################### Parse Arguments ###############################
+
+if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        _cmdline_parser.print_help(sys.stderr)
+        sys.exit(1)
+    elif len(sys.argv) == 2:
+        if _mode_parsers.has_key(sys.argv[1]):
+            _mode_parsers[sys.argv[1]].print_help(sys.stderr)
+        else:
+            _cmdline_parser.print_help(sys.stderr)
+        sys.exit(1)
+
+    ret = -1
+    try:
+        with Test(sys.argv[1:]) as test:
+            ret = test.run()
+    except KeyboardInterrupt as e:
+        pass
+
+    sys.exit(ret)

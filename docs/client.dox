@@ -1,0 +1,81 @@
+// Percy++ Copyright 2007,2012,2013,2014
+// Ian Goldberg <iang@cs.uwaterloo.ca>,
+// Casey Devet <cjdevet@uwaterloo.ca>
+// 
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of version 2 of the GNU General Public License as
+// published by the Free Software Foundation.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// There is a copy of the GNU General Public License in the COPYING file
+// packaged with this plugin; if you cannot find it, write to the Free
+// Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+// 02110-1301 USA
+
+/** \page client PIR Client
+
+A PIR client is used to retrieve database blocks from a server.
+
+Below we explain the steps necessary to create a PIR client using our interface.
+
+\section c_params Protocol Parameters
+
+The first step is to create a <b>protocol parameters</b> object with information 
+about our protocol and the database.  This protocol parameters object will be an 
+instantiation of one of the classes derived from PercyParams:
+<dl>
+<dt>ZZ_pParams</dt>
+<dd>Goldberg's IT-PIR protocol (2007) over the integers modulo p</dd>
+<dt>GF2EParams</dt>
+<dd>Goldberg's IT-PIR protocol (2007) over GF(2^E)</dd>
+<dt>ChorParams</dt>
+<dd>Chor et al.'s IT-PIR protocol (1995)</dd>
+<dt>AGParams</dt>
+<dd>Aguilar Melchor and Gaborit's CPIR protocol (2007)</dd>
+<dt>RecursiveAGParams</dt>
+<dd>Aguilar Melchor and Gaborit's CPIR protocol (2007) with recursion</dd>
+<dt>HybridParams</dt>
+<dd>Devet and Goldberg's Hybrid PIR protocol (2014)</dd>
+</dl>
+
+\section clientparams Client Parameters
+
+The protocol parameters object is then encapsulated in a <b>client
+parameters</b> object.  This contains information about how the client will
+encode the queries and decode the server replies.
+
+If our protocol parameters object is non-recursive (one of AGParams, ChorParams,
+GF2EParams, or ZZ_pParams) we create a PercyClientParams object.
+
+Otherwise, our protocol parameters object is recursive (one of HybridParams or
+RecursiveAGParams) and we create a RecursiveClientParams object.
+
+\section makeclient Client
+
+Finally, we create our <b>client</b> object.  This is done by passing our 
+client parameters to the factory method PercyClient::make_client().
+
+\subsection useclient Using the Client
+
+To retrieve database blocks from the database, we do the following:
+<ol>
+<li>Encode the request to the server by calling PercyClient::encode_request() on
+the desired database block indices.  The result will be a request ID that will
+be needed for the rest of the steps.</li>
+<li>Establish connection(s) to the server(s) and send the request to the 
+server(s) using the PercyClient::send_request() method.</li>
+<li>Read the response(s) from the server(s) using the 
+PercyClient::receive_replies() method.</li>
+<li>Decode the reponse(s) from the server(s) using the 
+PercyClient::process_replies() method.</li>
+<li>Retrieve the results of decoding with the PercyClient::get_result()
+method.</li>
+</ol>
+The steps above can be done all at once using the PercyClient::fetch_blocks()
+method.
+
+*/

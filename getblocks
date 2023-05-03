@@ -1,0 +1,81 @@
+#!/usr/bin/env python
+
+## Percy++ Copyright 2007,2012,2013,2014
+## Ian Goldberg <iang@cs.uwaterloo.ca>,
+## Casey Devet <cjdevet@uwaterloo.ca>
+## 
+## This program is free software; you can redistribute it and/or modify
+## it under the terms of version 2 of the GNU General Public License as
+## published by the Free Software Foundation.
+## 
+## This program is distributed in the hope that it will be useful,
+## but WITHOUT ANY WARRANTY; without even the implied warranty of
+## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+## GNU General Public License for more details.
+## 
+## There is a copy of the GNU General Public License in the COPYING file
+## packaged with this plugin; if you cannot find it, write to the Free
+## Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+## 02110-1301 USA
+
+import os, sys
+import argparse
+
+def get_blocks (database, block_size, block_numbers):
+    blocks = set(sorted(block_numbers))
+    ret = {}
+    f = file(database, 'r')
+    i = 0
+    B = None
+    for b in blocks:
+	f.seek((b - i) * block_size, os.SEEK_CUR)
+	i += b - i
+	ret[b] = f.read(block_size)
+	if len(ret[b]) < block_size:
+	    raise IOError('The database is not large enough')
+	i += 1
+    f.close()
+    return ret
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+
+    def pos_int (s):
+	ret = int(s)
+	if ret < 1:
+	    raise ValueError('Invalid positive integer: %r' % (s))
+	return ret
+
+    def nat (s):
+	ret = int(s)
+	if ret < 0:
+	    raise ValueError('Invalid positive integer: %r' % (s))
+	return ret
+
+    def existing_file (s):
+	if os.path.exists(s):
+	    return s
+	raise ValueError('File does not exist: %s' % (s))
+
+    parser.add_argument('database', type=existing_file,
+	    help='The database file')
+    parser.add_argument('block_size', type=pos_int,
+	    help='The size of each database block')
+    parser.add_argument('block_numbers', type=nat, nargs=argparse.REMAINDER, metavar='block_number_i',
+	    help='The ith block number to output')
+    parser.usage = '%(prog)s database block_size block_number_0 block_number_1 ...'
+
+    args = parser.parse_args()
+
+    try:
+	blocks = get_blocks(args.database, args.block_size, args.block_numbers)
+    except IOError, e:
+	sys.stderr.write('One or more of the block numbers is to large.\n')
+	sys.exit(1)
+
+    for b in args.block_numbers:
+	sys.stdout.write(blocks[b])
+    sys.stdout.flush()
+

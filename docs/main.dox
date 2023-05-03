@@ -1,0 +1,114 @@
+// Percy++ Copyright 2007,2012,2013,2014
+// Ian Goldberg <iang@cs.uwaterloo.ca>,
+// Casey Devet <cjdevet@uwaterloo.ca>
+// 
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of version 2 of the GNU General Public License as
+// published by the Free Software Foundation.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// There is a copy of the GNU General Public License in the COPYING file
+// packaged with this plugin; if you cannot find it, write to the Free
+// Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+// 02110-1301 USA
+
+/** \mainpage Percy++
+
+<p>Percy++ is an implementation of the private information retrieval (PIR)
+protocols from the papers:</p>
+
+<ul>
+
+<li>    Ian Goldberg.  <a
+href="https://cs.uwaterloo.ca/~iang/pubs/robustpir.pdf">Improving the Robustness of Private Information
+    Retrieval</a>.  Proc. of 2007 IEEE Symposium on Security and Privacy
+    (Oakland 2007), May 2007.</li>
+
+<li>    Ryan Henry, Femi Olumofin, Ian Goldberg.  <a
+href="https://cs.uwaterloo.ca/~iang/pubs/piracl-ccs.pdf">Practical PIR for
+    Electronic Commerce</a>.  18th ACM Conference on Computer and
+    Communications Security, October 2011.</li>
+
+<li>    Casey Devet, Ian Goldberg, and Nadia Heninger.  <a
+href="https://cs.uwaterloo.ca/~iang/pubs/orpir-usenix.pdf">Optimally Robust
+    Private Information Retrieval</a>.  21st USENIX Security Symposium,
+    August 2012.</li>
+
+<li>    Carlos Aguilar Melchor and Philippe Gaborit.  <a
+href="https://eprint.iacr.org/2007/446.pdf">A Lattice-Based
+    Computationally-Efficient Private Information Retrieval Protocol</a>.
+    WEWORC 2007, July 2007.</li>
+
+<li>    Casey Devet and Ian Goldberg. <a
+href="https://cs.uwaterloo.ca/~iang/pubs/hybridpir-pets.pdf">The Best of Both Worlds: Combining
+    Information-Theoretic and Computational PIR for Communication
+    Efficiency</a>. 14th Privacy Enhancing Technologies Symposium (PETS
+    2014), July 2014.</li>
+
+<li>    Wouter Lueks, Ian Goldberg. <a
+href="http://cacr.uwaterloo.ca/techreports/2014/cacr2014-19.pdf">Sublinear Scaling for Multi-Client
+    Private Information Retrieval</a>. CACR Tech Report 2014-19,
+    September 2014.</li>
+</ul>
+
+<p>Briefly, private information retrieval is the task of fetching a block
+of data from a database server (or a group of distributed servers)
+without the server(s) learning which block it was that you were
+interested in.</p>
+
+<p>These protocols provide <b>t-private v-Byzantine-robust &tau;-independent
+k-out-of-l private information retrieval</b>.  This means:</p>
+
+<dd>
+<dt><b>k-out-of-l:</b></dt>
+<dd>there are l distributed database servers, and we only need
+            to receive replies from k of them (the rest might be down,
+	    overloaded, unreachable, etc.)</dd>
+
+<dt><b>t-private:</b></dt>
+<dd>no coalition of up to t servers receives <em>any information at
+            all</em> about the block you are interested in</dd>
+
+<dt><b>v-Byzantine-robust:</b></dt>
+<dd>up to v of the servers that do reply might give
+		    <em>incorrect</em> answers; we will want to detect which
+		    servers did that, and to determine the correct
+		    database block</dd>
+
+<dt><b>&tau;-independent:</b></dt>
+<dd>the database is split between the servers so that no
+                 coalition of up to &tau; of them can determine the
+		 contents of the database itself (&tau;=0 means all the
+		 servers just have a complete copy of the database)</dd>
+</dl>
+
+<p>All of the above are "information-theoretic"; that is, the protections
+hold even if the servers have unlimited computational power, so long as
+no more than t server are colluding to determine the client's query.</p>
+
+<p>Any choice of t, v, &tau;, k and l will work, so long as they satisfy the
+following conditions:</p>
+
+<ul>
+<li>They are all nonnegative integers.</li>
+<li>0 &lt; t &lt;= t + &tau; &lt; k &lt;= l</li>
+<li>0 &lt;= v &lt; k - t - &tau; - 1</li>
+</ul>
+
+<p>This library also supports "computational" PIR, in which there is a
+single server, and it cannot learn the contents of the query, but the
+scheme has no robustness.  The security of this scheme relies on certain
+lattice-based cryptographic assumptions.</p>
+
+<p>Finally, it support "hybrid" PIR, which combines an
+information-theoretic PIR scheme with a computational one in order to
+hedge against either the non-collusion assumption or the cryptographic
+assumption being violated.</p>
+
+<p>Percy++ is written in C++, using Victor Shoup's <a
+href="http://www.shoup.net/ntl/">NTL</a> library.</p>
+*/

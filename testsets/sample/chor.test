@@ -1,0 +1,11 @@
+_name = 'chor'
+__doc__ = 'Sample CHOR test set'
+
+num_tests = 10
+num_queries = 2
+mode = 'CHOR'
+num_servers = 3
+num_blocks = [10, 100, 1000]
+block_size = varmap(lambda num_blocks: num_blocks * 10, 'num_blocks')
+database = 'wdb'
+
