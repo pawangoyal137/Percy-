@@ -1,3 +1,72 @@
+# Getting Percy++ working
+Percy++ uses the following libraries; so will need to install them 
+before we can use Percy++:
+
+- NTL (http://www.shoup.net/ntl/)
+- Socket++ (http://www.linuxhacker.at/socketxx/)
+- libgcrypt (http://www.gnu.org/software/libgcrypt/)
+
+Install GMP if not already
+```
+sudo apt-get install libgmp-dev
+```
+
+### Get NTL library
+```
+wget https://libntl.org/ntl-11.5.1.tar.gz
+gunzip ntl-11.5.1.tar.gz 
+tar xf ntl-11.5.1.tar
+cd ntl-xxx/src
+./configure 
+make 
+make check
+sudo make install
+```
+### Get socketxx
+```
+git clone https://github.com/pawangoyal137/socketxx
+sudo apt-get install libtool
+cd socketxx
+./autogen
+./configure --prefix=/usr --enable-debug
+# Switch sys_siglist to strsignal in socket++/config.h and remove sys_errlist in  socket++/local.h socket++/config.h and socket++/socketstream.ccp
+make
+sudo make install
+```
+
+### Get libgcrypt
+
+```
+# install libgpg error required for libgcrypt
+wget https://www.gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-1.47.tar.bz2
+tar -xjf libgpg-error-1.47.tar.bz2 
+cd libgpg-error-1.47
+./configure --prefix=/usr
+make
+make check 
+sudo make install
+# get the readme
+sudo install -v -m644 -D README /usr/share/doc/libgpg-error-1.47/README
+
+# get libgcrypt
+wget https://www.gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.10.2.tar.bz2
+tar -xjf libgcrypt-1.10.2.tar.bz2
+cd libgcrypt-1.10.2/
+./configure --prefix=/usr
+make
+make -C doc html
+sudo apt install texinfo
+makeinfo --html --no-split -o doc/gcrypt_nochunks.html doc/gcrypt.texi
+makeinfo --plaintext       -o doc/gcrypt.txt           doc/gcrypt.texi
+make check
+sudo make install
+```
+
+------------------------------------------------
+-----------------
+----------------
+# Below is the original Readme and can be found at http://downloads.sourceforge.net/percy/percy++-1.0.0.tar.gz
+
 Percy++ / PIR in C++
 
 Ian Goldberg <iang@cs.uwaterloo.ca>

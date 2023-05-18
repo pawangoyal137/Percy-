@@ -6,6 +6,8 @@ import signal
 
 B = 32768
 R = 32768
+# B = 1448
+# R = 1448
 
 def extract_num(s):
     """
@@ -29,7 +31,7 @@ def read_server_output(id, server_process):
 def start_server(id):
     print(f"Starting Server")
     from subprocess import Popen, PIPE, CalledProcessError
-    server_process = subprocess.Popen(f"./pirserver big_database {id} {R} {B}", 
+    server_process = subprocess.Popen(f"./pirserver database {id} {R} {B} -m g", 
                                 shell=True,
                                 stdout=subprocess.PIPE, 
                                 stderr=subprocess.STDOUT,
@@ -48,23 +50,21 @@ def start_server(id):
     return server_process, output_thread, port_num
 
 
-def start_client(port_num1, port_num2):
+def start_client(port_num):
     print(f"Starting Client")
-    client_process = subprocess.Popen(f"./pirclient {R} {B} '1:localhost:{port_num1} 2:localhost:{port_num2}' 1 1", 
+    client_process = subprocess.Popen(f"./pirclient {R} {B} '1:localhost:{port_num}' 0 1 -m g", 
                                 shell=True,
                                 stdout=subprocess.PIPE, 
                                 stderr=subprocess.STDOUT,
                                 bufsize=1)
                                 # universal_newlines=True)
-    for line in client_process.stdout:
-        print(f"Client: {line} \n", end='') # process line here
+    for _ in client_process.stdout:
+        # print(f"Client: {line} \n", end='') # process line here
+        continue
 
-NUM_TRIALS = 2
+NUM_TRIALS = 10
 server_process1, output_thread1, port_num1 = start_server(1)
-server_process2, output_thread2, port_num2 = start_server(2)
 for _ in range(NUM_TRIALS):
-    start_client(port_num1, port_num2)
+    start_client(port_num1)
 os.killpg(os.getpgid(server_process1.pid), signal.SIGTERM)
-os.killpg(os.getpgid(server_process2.pid), signal.SIGTERM) 
 output_thread1.join()
-output_thread2.join()
